@@ -2,7 +2,23 @@
 """Placeholder feed for petcam, now themed as the HEIST: the 'MARK'S SCREEN'
 recon feed. Posts an animated 1280x720 jpeg every 0.5s until the real laptop
 ffmpeg/native feed is live. Pure placeholder = the mark's desk while we scope
-the score. Stdlib + PIL only."""
+the score. Stdlib + PIL only.
+
+WHY IT EXISTS (judges may ask)
+  Two jobs: (1) let the whole pipeline (receiver, mpv HUD, brain, pet, score
+  channel) be demoed end-to-end WITHOUT the laptop present -- the demo must
+  not depend on the mark being online; (2) it IS the theme: the heist HUD
+  (comms bar, crosshair, loot manifest, getaway note) is the product's face,
+  so the placeholder is not throwaway filler, it's the designed UI.
+  When the real feed takes over, the placeholder is just `systemctl --user
+  stop petcam-placeholder`; the brain tells them apart via /state's
+  last_client (placeholder = our own tailnet IP).
+
+HOW IT DRAWS
+  One PIL Image per frame, drawn fresh, JPEG-quantized to ~70, POSTed to
+  /frame. The only animation is frame index i driving the scanline position
+  ((i*18) % mh) and the elapsed timer -- cheap on CPU, no video encode.
+"""
 import io, time, urllib.request
 from PIL import Image, ImageDraw, ImageFont
 

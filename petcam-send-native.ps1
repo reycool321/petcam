@@ -3,6 +3,26 @@
 # (CopyFromScreen) + built-in WebClient to POST JPEG frames to the receiver.
 # ~5 fps @ 1280x720, plenty for watching. Close this window to stop.
 # Run (Tailscale connected):  powershell -ExecutionPolicy Bypass -File petcam-send-native.ps1
+#
+# WHY THIS EXISTS (the "clean getaway" camera)
+#   The primary camera for the mark: one line on the laptop, iex (irm ...).
+#   Everything it uses ships with Windows, so the hackathon demo needs zero
+#   installs on the remote machine (the user's explicit constraint).
+#
+# WHY COPYFROMSCREEN + JPEG INSTE OF A VIDEO PIPELINE
+#   A full-frame GDI bitmap grab per tick is simple and dependency-free; at
+#   1280x720 q75 it's ~30-40 KB/frame, which rides comfortably over the
+#   tailnet (the laptop is relayed). Downsampling is done in-process
+#   (Bilinear DrawImage) so the network payload stays small.
+#
+# WHY THE INPUT BLOCK IS P/Invoke (SendInput)
+#   The SCORE channel: the camera is the only thing on the mark's machine, so
+#   it is also the only thing that can inject input there. HQ pushes
+#   {type:click|type, x, y} into the receiver's /control queue; this loop
+#   polls it each tick and applies the events via user32!SendInput in the
+#   mark's own screen space (feed coords x,y scaled to the local resolution).
+#   Struct layout matters: INPUT.dwExtraInfo is a pointer, so both the union
+#   and the INPUT struct are sized for 64-bit (PowerShell 5.1 is AnyCPU).
 $ErrorActionPreference = "Continue"
 $target = if ($env:PETCAM_TARGET) { $env:PETCAM_TARGET } else { "http://100.86.251.100:9101/frame" }
 $ow = 1280; $oh = 720          # output resolution (laptop screen is downscaled)
