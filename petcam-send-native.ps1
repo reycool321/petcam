@@ -91,14 +91,14 @@ Add-Type @"
   [DllImport("user32.dll", SetLastError=true)] static extern bool SetProcessDPIAware();
   [DllImport("user32.dll", SetLastError=true)] static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
   [DllImport("user32.dll", SetLastError=true)] static extern IntPtr GetDC(IntPtr h);
-  [DllImport("gdi32.dll",  SetLastError=true)] static extern bool ReleaseDC(IntPtr h, IntPtr d);
+  [DllImport("user32.dll", SetLastError=true)] static extern int ReleaseDC(IntPtr h, IntPtr d);
   [DllImport("gdi32.dll",  SetLastError=true)] static extern int GetDeviceCaps(IntPtr h, int i);
   [DllImport("kernel32.dll")] static extern uint GetLastError();
   const uint MOUSEEVENTF_LEFTDOWN=0x0002, MOUSEEVENTF_LEFTUP=0x0004,
              MOUSEEVENTF_RIGHTDOWN=0x0008, MOUSEEVENTF_RIGHTUP=0x0010;
   const ushort KEYEVENTF_KEYUP=0x0002, KEYEVENTF_UNICODE=0x0004;
-  const long DPI_AWARENESS_CONTEXT_SYSTEM_AWARE = -4;
-  const int SM_XVIRTUALSCREEN=-75, SM_YVIRTUALSCREEN=-76, SM_CXVIRTUALSCREEN=-77, SM_CYVIRTUALSCREEN=-78;
+  const long DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4;
+  const int SM_XVIRTUALSCREEN=76, SM_YVIRTUALSCREEN=77, SM_CXVIRTUALSCREEN=78, SM_CYVIRTUALSCREEN=79;
   const int LOGPIXELSX = 88;
   static uint Check(uint n, uint injected) {
     if (injected != n) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "SendInput injected " + injected + "/" + n);
@@ -133,8 +133,8 @@ Add-Type @"
   public static string DpiAware() {
     int err = 0;
     try {
-      if (SetProcessDpiAwarenessContext(new IntPtr(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE)))
-        return "SetProcessDpiAwarenessContext(system-aware)";
+      if (SetProcessDpiAwarenessContext(new IntPtr(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)))
+        return "SetProcessDpiAwarenessContext(per-monitor-v2)";
       err = Marshal.GetLastWin32Error();
     } catch (System.EntryPointNotFoundException) { err = 0; }
     try {
@@ -226,6 +226,8 @@ function Map-Desktop {
 function Post-Result {
   param($Web, [int]$seq, $body)
   try {
+    $body.session_id = $script:sessId
+    $body.cmd_id = $seq
     [void]$Web.UploadString("$ctrlBase/result", "POST", (ConvertTo-Json $body -Depth 6))
   } catch {
     Write-Host ("score: result post failed (non-fatal): {0}" -f $_.Exception.Message)
@@ -261,7 +263,7 @@ function Poll-Control {
         if ($stale) {
           Write-Host ("score: seq {0} STALE geometry (v{1} != live v{2}) - applying with live map; HQ should re-stamp after a display change" -f $e.seq, $e.geometry_version, $script:geoVer)
           if ($e.seq -gt $script:lastSeq) { $script:lastSeq = $e.seq }   # don't re-fire it next poll
-          # fall through: the feed coords are still valid; the LIVE map is applied.
+          continue # Reject commands aimed using stale geometry.
         }
         try {
           if ($e.type -eq 'click') {
@@ -370,6 +372,7 @@ function Measure-Bounds {
   if ($hasReadback) { $um = [PetcamInput]::Metrics() }
   $vsb = [System.Windows.Forms.SystemInformation]::VirtualScreen
   if ($null -ne $um) {
+    if ($um[2] -le 0 -or $um[3] -le 0) { throw "Invalid user32 capture bounds; refusing zero-sized capture" }
     if ($um[0] -ne $vsb.X -or $um[1] -ne $vsb.Y -or $um[2] -ne $vsb.Width -or $um[3] -ne $vsb.Height) {
       Write-Host ("petcam-native: WARN bounds disagree user32 ({0},{1},{2}x{3}) vs WinForms ({4},{5},{6}x{7}) - using user32" -f
                   $um[0], $um[1], $um[2], $um[3], $vsb.X, $vsb.Y, $vsb.Width, $vsb.Height)
