@@ -1,8 +1,6 @@
-__pycache__/
-*.pyc
+inbox/
+journal.jsonl
+*.out
+client-state.json
 cmd.json
-latest.jpg
-latest.jpg.tmp
-*.mp4
-!evals/fixtures/
-evals/fixtures/fixture_*.json.bak
+backups/
