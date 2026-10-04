@@ -1,0 +1,41 @@
+{"t": 1791098428.8166378, "cmd": "recon", "frame_before": "2e51358e4a60", "feed_age": 0.2, "feed_frames": 11812}
+{"t": 1791098432.8444414, "cmd": "type", "text": "xswxsw", "x": 640, "y": 720, "result": "fired (seq 1)", "frame_after": "aee24f96c1ad", "diff": 0.0193, "changed": true}
+{"t": 1791100890.6569927, "cmd": "click", "x": 640.0, "y": 690.0, "button": 1, "result": "fired (seq 1)", "frame_after": "ee83b2fdbd16", "diff": 0.0, "changed": false}
+{"t": 1791100894.1906092, "cmd": "type", "text": "hi from HQ (petcam score channel)", "x": 640, "y": 720, "result": "fired (seq 2)", "frame_after": "e28673c56321", "diff": 0.0, "changed": false}
+{"t": 1791101013.7516541, "cmd": "click", "x": 640.0, "y": 75.0, "button": 1, "result": "fired (seq 3)", "frame_after": "7efacee1adec", "diff": 0.0003, "changed": false}
+{"t": 1791101121.3098488, "cmd": "click", "x": 1150.0, "y": 30.0, "button": 1, "result": "fired (seq 4)", "frame_after": "34f20206b951", "diff": 0.0, "changed": false}
+{"t": 1791101244.8732088, "cmd": "click", "x": 640.0, "y": 30.0, "button": 1, "result": "fired (seq 5)", "frame_after": "671b32fa33f3", "diff": 0.0, "changed": false}
+{"t": 1791101518.5404694, "cmd": "click", "x": 565.0, "y": 27.0, "button": 1, "result": "fired (seq 6)", "frame_after": "fb104345c935", "diff": 0.0, "changed": false}
+{"t": 1791101614.0970976, "cmd": "click", "x": 640.0, "y": 670.0, "button": 1, "result": "fired (seq 7)", "frame_after": "a3fb617b8c21", "diff": 0.0002, "changed": false}
+{"t": 1791101617.6308491, "cmd": "type", "text": "AB12", "x": 640, "y": 720, "result": "fired (seq 8)", "frame_after": "83d39b91806b", "diff": 0.0007, "changed": false}
+{"t": 1791102728.150443, "cmd": "click", "x": 339.0, "y": 13.0, "button": 1, "result": "fired (seq 4)", "frame_after": "ec001d5a6d90", "diff": 0.1094, "changed": true}
+{"t": 1791102801.7198913, "cmd": "click", "x": 505.0, "y": 13.0, "button": 1, "result": "fired (seq 5)", "frame_after": "725c2c0b936b", "diff": 0.0014, "changed": false}
+{"t": 1791103176.6443121, "cmd": "key", "key": "t", "mods": ["ctrl"], "result": "fired (seq 6)", "frame_after": "d4e25a646848", "diff": 0.0148, "changed": true}
+{"t": 1791103220.2087307, "cmd": "click", "x": 300.0, "y": 250.0, "button": 1, "result": "fired (seq 7)", "frame_after": "fc40ebd1a652", "diff": 0.0, "changed": false}
+{"t": 1791103275.7565415, "cmd": "key", "key": "t", "mods": ["ctrl"], "result": "fired (seq 8)", "frame_after": "3cac9aef0479", "diff": 0.0, "changed": false}
+{"t": 1791103503.3492625, "cmd": "click", "x": 300.0, "y": 300.0, "button": 1, "result": "fired (seq 9)", "frame_after": "2fd303c63ac3", "diff": 0.0, "changed": false}
+{"t": 1791103506.8839438, "cmd": "key", "key": "t", "mods": ["ctrl"], "result": "fired (seq 10)", "frame_after": "eb734027d197", "diff": 0.0, "changed": false}
+{"t": 1791103574.4345875, "cmd": "click", "x": 400.0, "y": 65.0, "button": 1, "result": "fired (seq 11)", "frame_after": "551fb6cdcc0b", "diff": 0.0, "changed": false}
+{"t": 1791103577.9717445, "cmd": "type", "text": "discord.com", "x": 640, "y": 720, "result": "fired (seq 12)", "frame_after": "551fb6cdcc0b", "diff": 0.0, "changed": false}
+{"t": 1791103769.5563385, "cmd": "click", "x": 714.0, "y": 25.0, "button": 1, "result": "fired (seq 13)", "frame_after": "4aaa17eeafff", "diff": 0.0, "changed": false}
+{"t": 1791104631.5989408, "cmd": "click", "x": 595.0, "y": 21.0, "button": 1, "result": "fired (seq 1)", "frame_after": "f4562de55549", "diff": 0.0, "changed": false}
+{"t": 1791104761.163242, "cmd": "click", "x": 595.0, "y": 21.0, "button": 1, "result": "fired (seq 2)", "frame_after": "cd01e9d43544", "diff": 0.0, "changed": false}
+{"t": 1791105511.00448, "cmd": "click", "x": 60.0, "y": 40.0, "button": 1, "result": "fired (seq 1)", "frame_after": "f793cd066cfc", "diff": 0.1112, "changed": true}
+{"t": 1791105846.6474066, "cmd": "click", "x": 595.0, "y": 21.0, "button": 1, "result": "fired (seq 2)", "frame_after": "d6fbdc066d39", "diff": 0.417, "changed": true}
+{"t": 1791105904.192799, "cmd": "click", "x": 300.0, "y": 300.0, "button": 1, "result": "fired (seq 3)", "frame_after": "45bab25f92b8", "diff": 0.0171, "changed": true}
+{"t": 1791106013.7508628, "cmd": "click", "x": 595.0, "y": 21.0, "button": 1, "result": "fired (seq 4)", "frame_after": "42adc97c63b2", "diff": 0.153, "changed": true}
+{"t": 1791106311.4311788, "cmd": "click", "x": 600.0, "y": 25.0, "button": 1, "result": "fired (seq 8)", "frame_after": "40e6c5519c16", "diff": 0.0, "changed": false}
+{"t": 1791106440.9945674, "cmd": "click", "x": 300.0, "y": 300.0, "button": 1, "result": "fired (seq 9)", "frame_after": "e182c557ee86", "diff": 0.094, "changed": true}
+{"t": 1791106444.5268445, "cmd": "key", "key": "t", "mods": ["ctrl"], "result": "fired (seq 10)", "frame_after": "127334025412", "diff": 0.0, "changed": false}
+{"t": 1791106550.0858204, "cmd": "key", "key": "t", "mods": ["ctrl"], "result": "fired (seq 11)", "frame_after": "d0d873bf352e", "diff": 0.0003, "changed": false}
+{"t": 1791106591.6275187, "cmd": "click", "x": 610.0, "y": 22.0, "button": 1, "result": "fired (seq 12)", "frame_after": "9df65a36bfe7", "diff": 0.6013, "changed": true}
+{"t": 1791106747.2006495, "cmd": "key", "key": "t", "mods": ["ctrl"], "result": "fired (seq 13)", "frame_after": "1bc1f1a5346a", "diff": 0.0, "changed": false}
+{"t": 1791107579.0728755, "cmd": "recon", "frame_before": "4e02caaad420", "feed_age": 142.4, "feed_frames": 3137}
+{"t": 1791107741.201378, "cmd": "click", "x": 525.0, "y": 20.0, "button": 1, "result": "fired (seq 14)", "frame_after": "7383f1534a04", "diff": 0.0, "changed": false}
+{"t": 1791107768.7391934, "cmd": "click", "x": 640.0, "y": 95.0, "button": 1, "result": "fired (seq 15)", "frame_after": "5c65b8d4d006", "diff": 0.1663, "changed": true}
+{"t": 1791107772.2722208, "cmd": "type", "text": "discord.com", "x": 640, "y": 720, "result": "fired (seq 16)", "frame_after": "75c63167c2c5", "diff": 0.1559, "changed": true}
+{"t": 1791107877.8290987, "cmd": "click", "x": 640.0, "y": 95.0, "button": 1, "result": "fired (seq 17)", "frame_after": "cfb08b71e16b", "diff": 0.024, "changed": true}
+{"t": 1791107881.3613558, "cmd": "key", "key": "l", "mods": ["ctrl"], "result": "fired (seq 18)", "frame_after": "062191298904", "diff": 0.1015, "changed": true}
+{"t": 1791107884.8950496, "cmd": "type", "text": "https://discord.com", "x": 640, "y": 720, "result": "fired (seq 19)", "frame_after": "a7dff1d0cf10", "diff": 0.0666, "changed": true}
+{"t": 1791107888.4266076, "cmd": "key", "key": "enter", "mods": [], "result": "fired (seq 20)", "frame_after": "a7dff1d0cf10", "diff": 0.0, "changed": false}
+{"t": 1791107929.9689813, "cmd": "click", "x": 400.0, "y": 400.0, "button": 1, "result": "fired (seq 21)", "frame_after": "af9521de4b35", "diff": 0.0023, "changed": false}

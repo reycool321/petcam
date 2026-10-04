@@ -27,11 +27,30 @@ JOURNAL = os.path.join(HERE, "journal.jsonl")   # action -> observed outcome (th
 STATE_URL = os.environ.get("PETCAM_STATE", "http://100.86.251.100:9101/state")
 LATEST_URL = os.environ.get("PETCAM_LATEST", "http://100.86.251.100:9101/latest.jpg")
 CONTROL_URL = os.environ.get("PETCAM_CONTROL", "http://100.86.251.100:9101/control")
+CLIENT_URL = os.environ.get("PETCAM_CLIENT", "http://100.86.251.100:9101/client")
 POLL = 2.0
 STALE_AFTER = 5.0          # seconds without a new frame before "stale"
 PLACEHOLDER_IP = "100.86.251.100"   # our own IP => placeholder feed
 PET_AGENT = "laptop"        # the pet's agent-state key for the remote machine
 PET_POS_FILE = os.path.expanduser("~/.local/state/omarchy/pets/position.json")
+
+FEED_W, FEED_H = 1280, 720   # default; refresh_feed_dims() overrides from the
+                             # sender's /client handshake (its real feed size)
+
+
+def refresh_feed_dims():
+    """The sender reports its actual feed resolution in the /hello handshake
+    (adaptive: 1:1 native when the screen fits the 1920x1080 budget). Keep
+    our aim math in step with whatever the feed is actually emitting."""
+    global FEED_W, FEED_H
+    try:
+        with urllib.request.urlopen(CLIENT_URL, timeout=2) as r:
+            c = json.load(r)
+        f = c.get("feed") or {}
+        if int(f.get("w", 0)) > 0 and int(f.get("h", 0)) > 0:
+            FEED_W, FEED_H = int(f["w"]), int(f["h"])
+    except Exception:
+        pass
 
 _omarchy_shell = shutil.which("omarchy-shell") or "omarchy-shell"
 
@@ -249,6 +268,7 @@ def main():
     last_health = None
     last_cmd = None
     while True:
+        refresh_feed_dims()
         st = fetch_state()
         now = time.time()
         if st is None:
@@ -311,7 +331,30 @@ def handle_cmd(cmd):
         fy = float(cmd["y"]) if "y" in cmd else None
         pet_think(inject_click(fx, fy, int(cmd.get("button", 1))))
     elif c == "type":
-        pet_think(inject_type(str(cmd.get("text", ""))))
+        pet_think(inject_type(str(cmd["text"])))
+    elif c == "move":
+        # Reposition the mark's cursor without clicking (aim before acting).
+        fx = float(cmd["x"]) if "x" in cmd else None
+        fy = float(cmd["y"]) if "y" in cmd else None
+        fx, fy = pet_pointer(fx, fy)
+        fx = min(max(fx, 0), FEED_W); fy = min(max(fy, 0), FEED_H)
+        res = push_control({"type": "move", "x": fx, "y": fy})
+        pet_think(f"score: cursor moved to {int(fx)},{int(fy)} -> {res}")
+    elif c == "key":
+        # Named keystroke, optional modifiers: {"cmd":"key","key":"t","mods":["ctrl"]}
+        key = str(cmd.get("key", ""))
+        mods = [str(m) for m in cmd.get("mods", [])]
+        before_img = fetch_frame()
+        entry = {"t": time.time(), "cmd": "key", "key": key, "mods": mods,
+                 "before_img": before_img}
+        res = push_control({"type": "key", "key": key, "mods": mods})
+        entry["result"] = res
+        verify_action(entry)
+        ch = entry.get("changed")
+        verdict = {True: "mark responded (diff " + str(entry.get("diff")) + ")",
+                   False: "no visible response (diff " + str(entry.get("diff")) + ")",
+                   None: "unverifiable (feed down)"}[ch]
+        pet_think(f"score: key {key} {'+'.join(mods) if mods else ''} -> {res}; {verdict}")
     elif c == "loot":
         # Heist move: carry the mark's agent memory back to HQ. DATA ONLY  -
         # read the hermes session store off disk (no Hermes process in the loop),

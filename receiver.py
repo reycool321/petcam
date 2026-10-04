@@ -42,6 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 LATEST = os.path.join(HERE, "latest.jpg")
 STATE = {"last_frame_at": 0.0, "frames": 0, "last_size": 0, "last_client": "?"}
+CLIENT = {"at": 0.0}   # /hello handshake: the sender's real screen bounds + caps
 LOCK = threading.Lock()
 # Score channel: control events (click/type) the brain forwards for the MARK's
 # machine. Senders poll /control?after=seq and apply them with SendInput.
@@ -134,6 +135,12 @@ class H(BaseHTTPRequestHandler):
             with LOCK:
                 body = json.dumps(STATE).encode()
             self._send(200, body, "application/json")
+        elif self.path.startswith("/client"):
+            # The sender's /hello handshake: real screen bounds + capabilities.
+            # HQ uses this to verify the feed->screen mapping instead of guessing.
+            with LOCK:
+                body = json.dumps(CLIENT).encode()
+            self._send(200, body, "application/json")
         elif self.path.startswith("/control"):
             # Score channel poll: events after a sequence number (senders apply
             # them with SendInput on the mark's machine; ack by polling onward).
@@ -146,6 +153,8 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 after = 0
             with LOCK:
+                STATE["last_control_poll_at"] = time.time()
+                STATE["last_control_poll_client"] = self.client_address[0]
                 body = json.dumps({"seq": CSEQ,
                                    "events": [e for e in CONTROL if e["seq"] > after]}).encode()
             self._send(200, body, "application/json")
@@ -186,8 +195,40 @@ class H(BaseHTTPRequestHandler):
                 CONTROL.append(evt)
             self._send(200, json.dumps({"ok": True, "seq": evt["seq"]}).encode(),
                        "application/json")
+        elif self.path == "/upload":
+            # Mark-to-HQ channel: the remote side POSTs a file (e.g. notes,
+            # logs, screenshots) straight to HQ. Saved to inbox/<ts>-<name>.
+            n = int(self.headers.get("Content-Length", 0))
+            data = self.rfile.read(n)
+            if not data:
+                self._send(400, b"empty body", "text/plain")
+                return
+            name = os.path.basename(self.headers.get("X-File-Name") or "upload")
+            name = "".join(c for c in name if c.isalnum() or c in "-_.")[-60:] or "upload"
+            inbox = os.path.join(os.path.dirname(LATEST), "inbox")
+            os.makedirs(inbox, exist_ok=True)
+            fname = time.strftime("%Y%m%d-%H%M%S-") + name
+            with open(os.path.join(inbox, fname), "wb") as f:
+                f.write(data)
+            self._send(200, ("saved inbox/" + fname).encode(), "text/plain")
+        elif self.path == "/hello":
+            # Connection handshake from the sender: real screen bounds
+            # (virtual + primary), DPI, capabilities. Stored so /client and
+            # the brain can verify the feed->screen coordinate mapping.
+            n = int(self.headers.get("Content-Length", 0))
+            data = self.rfile.read(n)
+            try:
+                info = json.loads(data)
+            except Exception:
+                self._send(400, b"bad json", "text/plain")
+                return
+            with LOCK:
+                CLIENT.update(info)
+                CLIENT["client"] = self.client_address[0]
+                CLIENT["at"] = time.time()
+            self._send(200, json.dumps({"ok": True}).encode(), "application/json")
         else:
-            self._send(404, b"only /frame and /control", "text/plain")
+            self._send(404, b"only /frame, /control and /upload", "text/plain")
 
 
 def main():
