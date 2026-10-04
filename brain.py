@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""petcam brain: a standalone, Hermes-independent daemon. Heist flavor — the
+"""petcam brain: a standalone, Hermes-independent daemon. Heist flavor  - the
 pet is the crew's *spotter* at HQ, watching the mark's screen (the feed).
 
 Watches the petcam receiver (/state) and drives the Omarchy pet:
@@ -12,7 +12,7 @@ Watches the petcam receiver (/state) and drives the Omarchy pet:
         echo '{"cmd":"loot"}'               > petcam/cmd.json   (lift intel)
 
 Runs on the 5090. Talks to the pet only through the `omarchy-shell` CLI, so
-the pet stays a stock Omarchy plugin — nothing custom is patched into it.
+the pet stays a stock Omarchy plugin  - nothing custom is patched into it.
 """
 import json
 import os
@@ -119,7 +119,7 @@ def handle_cmd(cmd):
         # as a thought; real injection lands when the control channel exists.
         pet_think(f"click @ {cmd.get('x')},{cmd.get('y')} (pending control link)")
     elif c == "loot":
-        # Heist move: carry the mark's agent memory back to HQ. DATA ONLY —
+        # Heist move: carry the mark's agent memory back to HQ. DATA ONLY  -
         # read the hermes session store off disk (no Hermes process in the loop),
         # surface a one-line summary as the pet's thought. This is the
         # "learn from Hermes" channel, framed as lifting intel.

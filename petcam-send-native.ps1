@@ -1,4 +1,4 @@
-# petcam-send-native.ps1 — zero-install screen streamer for Windows 10/11.
+# petcam-send-native.ps1  - zero-install screen streamer for Windows 10/11.
 # No ffmpeg, no Python, nothing installed: uses built-in .NET System.Drawing
 # (CopyFromScreen) + built-in WebClient to POST JPEG frames to the receiver.
 # ~5 fps @ 1280x720, plenty for watching. Close this window to stop.

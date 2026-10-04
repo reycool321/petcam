@@ -1,4 +1,4 @@
-# petcam-send.ps1 — Windows send side, zero installs (PowerShell 5.1+ + curl.exe,
+# petcam-send.ps1  - Windows send side, zero installs (PowerShell 5.1+ + curl.exe,
 # which ships with Windows 10 1803+). Watches a folder of JPEGs written by
 # ffmpeg (image2) and POSTs each finished frame to the receiver.
 #

@@ -1,5 +1,5 @@
 @echo off
-:: petcam-feed.bat — run this ON THE LAPTOP (Windows), next to petcam-send.py.
+:: petcam-feed.bat  - run this ON THE LAPTOP (Windows), next to petcam-send.py.
 :: Streams the Windows desktop to the 5090 over Tailscale (~150ms latency).
 :: Requirements: Tailscale connected + python + ffmpeg on PATH
 ::   (winget install Gyan.FFmpeg  and/or  winget install Python.Python.3.12)

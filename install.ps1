@@ -1,4 +1,4 @@
-# petcam install.ps1 — one-time bootstrap on the WINDOWS LAPTOP.
+# petcam install.ps1  - one-time bootstrap on the WINDOWS LAPTOP.
 # Usage (PowerShell, Tailscale must be connected):
 #   powershell -ExecutionPolicy Bypass -File "$env:TEMP\petcam-install.ps1"
 # Installs ffmpeg + Python (via winget, UAC prompt may appear), downloads the

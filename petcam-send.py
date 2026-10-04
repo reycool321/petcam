@@ -56,7 +56,7 @@ def main():
             req = urllib.request.Request(TARGET, data=frame, method="POST")
             urllib.request.urlopen(req, timeout=3)
             frames += 1
-        except Exception as e:  # receiver restarting, etc. — keep going
+        except Exception as e:  # receiver restarting, etc.  - keep going
             print(f"frame drop: {e}", file=sys.stderr)
     print(f"sent {frames} frames", file=sys.stderr)
 
