@@ -34,16 +34,37 @@ PLACEHOLDER_IP = "100.86.251.100"   # our own IP => placeholder feed
 PET_AGENT = "laptop"        # the pet's agent-state key for the remote machine
 PET_POS_FILE = os.path.expanduser("~/.local/state/omarchy/pets/position.json")
 
-FEED_W, FEED_H = 1280, 720   # default; refresh_feed_dims() overrides from the
-                             # sender's /client handshake (its real feed size)
+FEED_W, FEED_H = 1280, 720   # fallback only. refresh_feed_dims() overrides from
+                             # the receiver's /state (measured from ACTUAL
+                             # received frames, not the sender's nominal claim).
+                             # All aim math must use these — never the literal.
+GEO = {"v": None, "at": 0.0}  # current geometry version (refreshed per poll)
 
 
 def refresh_feed_dims():
-    """The sender reports its actual feed resolution in the /hello handshake
-    (adaptive: 1:1 native when the screen fits the 1920x1080 budget). Keep
-    our aim math in step with whatever the feed is actually emitting."""
+    """Feed dims = what the receiver measured off ACTUAL received frames
+    (/state frame_w/frame_h), falling back to the sender's declared feed size
+    from its /hello handshake. Keeps aim math in step with whatever geometry
+    is really being emitted — no hard-coded 1280x720."""
     global FEED_W, FEED_H
     try:
+        import urllib.request
+        with urllib.request.urlopen(STATE_URL, timeout=2) as r:
+            st = json.load(r)
+        w, h = int(st.get("frame_w") or 0), int(st.get("frame_h") or 0)
+        if w > 0 and h > 0:
+            FEED_W, FEED_H = w, h
+            v = st.get("geometry_version")
+            if v is not None and v != GEO["v"]:
+                if GEO["v"] is not None:
+                    print("brain: geometry changed v %s -> %s (capture/feed bounds or client)" % (GEO["v"], v), flush=True)
+                    pet_think("geometry changed - re-measure before aiming")
+                GEO["v"], GEO["at"] = v, time.time()
+            return
+    except Exception:
+        pass
+    try:
+        import urllib.request
         with urllib.request.urlopen(CLIENT_URL, timeout=2) as r:
             c = json.load(r)
         f = c.get("feed") or {}
@@ -80,7 +101,8 @@ def fetch_state():
         return None
 
 
-FEED_W, FEED_H = 1280, 720        # source frame space the senders emit
+FEED_W, FEED_H = 1280, 720        # (redundant re-statement; refresh_feed_dims
+                                   # keeps the authoritative values live)
 
 
 def ensure_ydotoold():
@@ -96,63 +118,147 @@ def ensure_ydotoold():
 
 
 def window_geom():
-    """Live petcam window geometry (at x,y / size w,h); fallback to the defaults."""
+    """Live petcam (mpv) feed-window geometry in GLOBAL HQ LOGICAL pixels:
+    (wx, wy, ww, wh, monx, mony). The window's monitor origin is included so
+    the caller can relate window-local and global coordinates; on a
+    multi-monitor HQ box the feed can be parked on any monitor.
+    hyprctl's at/size are LOGICAL (post-scale) pixels — the same unit the
+    pet anchor and the QML monitor model use — so the contain-fit of the
+    feed image into the window needs NO scale factor, even on a 1.6x
+    fractional-scale display. Mixing in physical pixels anywhere in this
+    chain is the old bug that mis-aimed by the scale factor."""
     try:
         out = subprocess.run(["hyprctl", "-j", "clients"],
                              capture_output=True, text=True, timeout=4).stdout
+        mons = subprocess.run(["hyprctl", "-j", "monitors"],
+                              capture_output=True, text=True, timeout=4).stdout
         for c in json.loads(out):
             if c.get("title") == "petcam":
-                return (c["at"][0], c["at"][1], c["size"][0], c["size"][1])
+                mlist = json.loads(mons)
+                mi = c.get("monitor", 0)
+                mon = mlist[mi] if mi < len(mlist) else {}
+                return (c["at"][0], c["at"][1], c["size"][0], c["size"][1],
+                        int(mon.get("x", 0)), int(mon.get("y", 0)))
     except Exception:
         pass
-    return (2064, 890, 480, 270)
+    return (2064, 890, 480, 270, 0, 0)   # default: 480x270 under the pet on DP-1
 
 
-def screen_geom():
-    """Primary monitor size on the HQ box (fallback 1920x1080)."""
+def pet_sprite_size():
+    """Pet sprite size in px at the configured scale. The ellen-joe-pixel
+    sheet is 192x208 per cell (8-col x 11-row sheet of 1536x2288); the pet
+    renders at pets.json "scale" (0.25-4.0, default 0.5)."""
+    scale = 0.5
+    try:
+        with open(os.path.expanduser("~/.config/omarchy/pets.json")) as f:
+            scale = float(json.load(f).get("scale", 0.5))
+    except Exception:
+        pass
+    return int(round(192 * scale)), int(round(208 * scale))
+
+
+def monitors_map():
+    """{monitor name: (origin_x, origin_y, scale)} from hyprctl."""
     try:
         out = subprocess.run(["hyprctl", "-j", "monitors"],
                              capture_output=True, text=True, timeout=4).stdout
-        m = json.loads(out)[0]
-        return (int(m["width"]), int(m["height"]))
+        return {m["name"]: (int(m["x"]), int(m["y"]), float(m.get("scale", 1.0)))
+                for m in json.loads(out)}
     except Exception:
-        return (1920, 1080)
+        return {"DP-1": (0, 0, 1.0)}
+
+
+def pet_anchor_global():
+    """The pet's character anchor: its FEET — bottom-center of the sprite.
+    EXACT ANCHOR DEFINITION: (saved_top_left_x + spriteW/2, saved_top_left_y + spriteH),
+    where the saved top-left is what fabri.ellen-pet's Service.qml writes on
+    drag-release: savePosition(screenName, pet.x, pet.y) -> position.json.
+
+    UNIT PROOF (why NO scale factor): the QML clamps its coords against the
+    monitor model's size (`Math.min(saved.x, win.width - width)`) and computes
+    centerGX = modelData.x + x + width/2 — so pet.x/y and hyprctl monitor
+    at/size share ONE unit: LOGICAL (post-scale) pixels, exactly the space
+    hyprctl reports. Multiplying by the monitor scale factor here would
+    double-apply it. The old 1.6x-multiplied version landed the anchor at
+    (3763,2160) for a pet parked at (2304,1246) — 1.6x too far in both axes.
+    Returns None when the position/monitor lookup fails — callers REJECT the
+    aim rather than fall back to a stale constant."""
+    try:
+        pos = json.load(open(PET_POS_FILE))
+    except Exception:
+        return None
+    mons = monitors_map()
+    for mon in ("DP-1", "HDMI-A-1"):      # DP-1 is where the feed is parked
+        if mon in pos and mon in mons:
+            ox, oy, _scale = mons[mon]    # origins are already logical
+            sw, sh = pet_sprite_size()
+            return (ox + int(round(int(pos[mon]["x"]) + sw / 2.0)),
+                    oy + int(round(int(pos[mon]["y"]) + sh)))
+    if "DP-1" in pos:                      # unknown monitor name: origin (0,0)
+        sw, sh = pet_sprite_size()
+        return (int(pos["DP-1"]["x"]) + sw // 2, int(pos["DP-1"]["y"]) + sh)
+    return None
 
 
 def pet_pointer(feed_x=None, feed_y=None):
-    """The pet's position IS the pointer: the spotter stands beside/over the
-    feed, so the crosshair on the mark's screen = the pet's location relative
-    to the feed viewport, mapped 1:1 into feed space (1280x720) and clamped.
-    feed_x/feed_y override for a one-shot aim (pet stays put)."""
+    """The pet's position IS the pointer: the spotter stands over the feed,
+    so the crosshair on the mark's screen = the pet's anchor (its FEET,
+    pet_anchor_global()) mapped through the feed image's DISPLAYED viewport.
+
+    COORDINATE SPACES (kept explicit):
+      1. HQ desktop: global pixels; the feed image lives in the mpv window
+         (title "petcam"), whose origin/size come from hyprctl.
+      2. HQ image viewport: the mpv window renders /stream.mjpeg with
+         object-fit: contain — the displayed image rectangle is the 16:9
+         frame aspect-fit into the window content, and the letterbox black
+         bars are EXCLUDED from the mapping (they are not feed pixels).
+      3. Feed pixels: the actual JPEG frame dimensions (FEED_W x FEED_H,
+         refreshed from the receiver, NOT a literal).
+
+    The anchor is converted to its monitor-local coords, compared against the
+    displayed-image rect (global), and mapped 1:1 into feed space. Result:
+    (feed_x, feed_y) or None when the anchor is OUTSIDE the displayed image
+    (pet parked over the bars / off the feed window) — callers reject, they
+    do not clamp: a clamped aim silently fires at the wrong spot.
+    feed_x/feed_y override for a one-shot aim (pet stays put); those must
+    already be feed pixels (bounds-checked by the caller)."""
     if feed_x is not None and feed_y is not None:
-        return feed_x, feed_y
-    px = py = None
-    try:
-        pos = json.load(open(PET_POS_FILE))
-        for mon in ("DP-1", "HDMI-A-1"):
-            if mon in pos:
-                px, py = pos[mon]["x"], pos[mon]["y"]
-                break
-    except Exception:
-        pass
-    if px is None:
-        px, py = 2304, 1246            # known default anchor
-    wx, wy, ww, wh = window_geom()
-    fx = (px - wx) / ww * FEED_W if ww else FEED_W / 2
-    fy = (py - wy) / wh * FEED_H if wh else FEED_H / 2
-    return fx, fy
+        return float(feed_x), float(feed_y)
+    anchor = pet_anchor_global()
+    if anchor is None:
+        return None
+    wx, wy, ww, wh, monx, mony = window_geom()
+    if ww <= 0 or wh <= 0:
+        return None
+    # displayed image rect: contain-fit of FEED_W x FEED_H into the window
+    ar = FEED_W / FEED_H if FEED_H else 16.0 / 9.0
+    if ww / float(wh) > ar:
+        vw, vh = wh * ar, float(wh)
+    else:
+        vw, vh = float(ww), ww / ar
+    vx = wx + (ww - vw) / 2.0              # window-local origin of the image
+    vy = wy + (wh - vh) / 2.0
+    axl = anchor[0] - monx                 # anchor in the window's monitor
+    ayl = anchor[1] - mony
+    if not (vx <= axl <= vx + vw and vy <= ayl <= vy + vh):
+        return None                        # outside the displayed image
+    return ((axl - vx) / vw * FEED_W, (ayl - vy) / vh * FEED_H)
 
 
 def push_control(evt):
     """Push a control event to the receiver for the sender to apply on the
-    mark's machine. Returns the receiver's reply (seq) or an error string."""
+    mark's machine. Returns the receiver's reply (seq [+ geometry_version])
+    or an error string."""
     import urllib.request
     try:
         req = urllib.request.Request(
             CONTROL_URL, data=json.dumps(evt).encode(),
             headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=3) as r:
-            return "fired (seq " + str(json.load(r).get("seq")) + ")"
+            reply = json.load(r)
+        extra = " (geo " + str(reply["geometry_version"]) + ")" \
+                if reply.get("geometry_version") else ""
+        return "fired (seq " + str(reply.get("seq")) + ")" + extra
     except Exception as e:
         return "control down: " + str(e)
 
@@ -228,9 +334,17 @@ def inject_click(feed_x=None, feed_y=None, button=1):
     override), mapped into feed space and pushed down the control channel.
     The SENDER applies it on the mark's own screen (SendInput) — no loop.
     Then verifies: did the mark's screen actually respond? (outcome is
-    journaled — the harness's learning data)."""
-    fx, fy = pet_pointer(feed_x, feed_y)
-    fx = min(max(fx, 0), FEED_W); fy = min(max(fy, 0), FEED_H)
+    journaled — the harness's learning data).
+    Explicit feed coords must lie inside the CURRENT feed bounds
+    (0 <= x < FEED_W, 0 <= y < FEED_H); out-of-bounds aims are REJECTED, not
+    clamped. Pet-driven aims outside the displayed image are rejected too."""
+    p = pet_pointer(feed_x, feed_y)
+    if p is None:
+        return "score: click rejected: pet is outside the feed image (reposition it over the pane)"
+    fx, fy = p
+    if feed_x is not None and feed_y is not None and not (0 <= fx < FEED_W and 0 <= fy < FEED_H):
+        return "score: click rejected: feed %g,%g outside 0..%d x 0..%d" % (fx, fy, FEED_W, FEED_H)
+    fx = min(max(int(round(fx)), 0), FEED_W - 1); fy = min(max(int(round(fy)), 0), FEED_H - 1)
     before_img = fetch_frame()
     entry = {"t": time.time(), "cmd": "click", "x": fx, "y": fy,
              "button": button, "before_img": before_img}
@@ -244,12 +358,41 @@ def inject_click(feed_x=None, feed_y=None, button=1):
     return f"score: crosshair {fx},{fy} -> {res}; {verdict}"
 
 
+def inject_move(feed_x=None, feed_y=None):
+    """Score, via the pet: move the mark's cursor WITHOUT clicking. Coords in
+    feed space; the SENDER maps to its own desktop and reads the cursor back.
+    A journal entry is written (requested feed pos + fired seq) so drive.py's
+    journal-wait works; the ground-truth readback (mapped/actual cursor)
+    comes back from the sender via /result — verified there, not by pixel
+    diff (a bare cursor move may not paint a new frame at all)."""
+    fx, fy = pet_pointer(feed_x, feed_y)
+    if fx is None:
+        return "score: move rejected: pet is outside the feed image (reposition it over the pane)"
+    if not (0 <= fx < FEED_W and 0 <= fy < FEED_H):
+        return "score: move rejected: feed %g,%g outside 0..%d x 0..%d (stale aim?)" % (fx, fy, FEED_W, FEED_H)
+    fx = int(round(fx)); fy = int(round(fy))
+    entry = {"t": time.time(), "cmd": "move", "x": fx, "y": fy,
+             "changed": None, "diff": None, "frame_after": None}
+    res = push_control({"type": "move", "x": fx, "y": fy, "verify": True})
+    entry["result"] = res
+    journal(entry)
+    return "score: cursor moved to feed %d,%d -> %s" % (fx, fy, res)
+
+
 def inject_type(text):
-    """Score, via the pet: the cursor moves to the crosshair (the spotter's
-    spot), then keystrokes land there — so whatever is under the crosshair
-    on the mark's screen receives the typing. Outcome verified + journaled."""
-    fx, fy = pet_pointer()
-    fx = min(max(int(fx), 0), FEED_W); fy = min(max(int(fy), 0), FEED_H)
+    """Score, via the pet: keystrokes land on whatever has FOCUS on the mark's
+    machine — position-independent (the sender's Type() sends unicode to the
+    foreground window). The pet's crosshair is journaled as context, NOT a
+    precondition: if the pet is outside the feed image the type still fires
+    (position None in the journal). Clicks/moves are the position-gated
+    ones — a click at a clamped crosshair is a silent miss, but a keystroke
+    with a wrong position is just a wrong journal note."""
+    p = pet_pointer()
+    if p is not None:
+        fx, fy = p
+        fx = min(max(int(fx), 0), FEED_W - 1); fy = min(max(int(fy), 0), FEED_H - 1)
+    else:
+        fx = fy = None    # pet parked off the feed: type anyway, journal it bare
     before_img = fetch_frame()
     entry = {"t": time.time(), "cmd": "type", "text": text,
              "x": fx, "y": fy, "before_img": before_img}
@@ -298,7 +441,10 @@ def main():
                 pet_state("running");pet_think("in on the mark's screen")
             last_health = health
 
-        # Drain command file
+        # Drain command file. last_cmd dedupes ONLY consecutive repeats within
+        # one poll cycle (e.g. a file written twice before consumption); it is
+        # cleared each time the queue is empty so a genuinely repeated command
+        # (click the same spot again) still fires.
         if os.path.exists(CMD_FILE):
             try:
                 with open(CMD_FILE) as f:
@@ -306,11 +452,20 @@ def main():
             except Exception:
                 cmd = None
             if cmd is not None and cmd != last_cmd:
-                handle_cmd(cmd)
+                try:
+                    result = handle_cmd(cmd)
+                except Exception as e:
+                    result = "ERROR: %r" % e
+                    log(f"handle_cmd exception: {e!r}", flush=True)
                 last_cmd = cmd
                 # consume
                 try: os.remove(CMD_FILE)
                 except OSError: pass
+            else:
+                journal({"t": time.time(), "cmd": cmd.get("cmd") if isinstance(cmd, dict) else cmd,
+                         "result": "deduped (identical to previous command)"})
+        else:
+            last_cmd = None
 
         time.sleep(POLL)
 
@@ -334,12 +489,11 @@ def handle_cmd(cmd):
         pet_think(inject_type(str(cmd["text"])))
     elif c == "move":
         # Reposition the mark's cursor without clicking (aim before acting).
+        # Explicit x/y (feed space) reject on out-of-bounds instead of
+        # clamping — a clamped aim is a silent miss. Omitted => the pet's spot.
         fx = float(cmd["x"]) if "x" in cmd else None
         fy = float(cmd["y"]) if "y" in cmd else None
-        fx, fy = pet_pointer(fx, fy)
-        fx = min(max(fx, 0), FEED_W); fy = min(max(fy, 0), FEED_H)
-        res = push_control({"type": "move", "x": fx, "y": fy})
-        pet_think(f"score: cursor moved to {int(fx)},{int(fy)} -> {res}")
+        pet_think(inject_move(fx, fy))
     elif c == "key":
         # Named keystroke, optional modifiers: {"cmd":"key","key":"t","mods":["ctrl"]}
         key = str(cmd.get("key", ""))

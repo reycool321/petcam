@@ -8,7 +8,10 @@ ARCHITECTURE (why it's shaped this way)
   ways:
     /latest.jpg      newest frame, for a browser view + click-mapping
     /stream.mjpeg    multipart/x-mixed-replace loop that mpv plays live
-    /state           JSON health for the brain (frame count, age, client)
+    /state           JSON health for the brain (frame count, age, client,
+                     actual frame geometry, geometry_version)
+    /results         cursor-readback results (sender posts them via /result
+                     after applying a move; drive polls them back)
   The brain (brain.py) polls /state, drives the pet, and pushes SCORE events
   to /control; the mark's camera polls /control?after=N and applies them with
   SendInput ON ITS OWN machine. That's the whole loop, and it's why HQ has no
@@ -43,7 +46,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 LATEST = os.path.join(HERE, "latest.jpg")
 STATE = {"last_frame_at": 0.0, "frames": 0, "last_size": 0, "last_client": "?"}
 CLIENT = {"at": 0.0}   # /hello handshake: the sender's real screen bounds + caps
-LOCK = threading.Lock()
+RESULTS = collections.OrderedDict()   # seq -> cursor-readback result (move), newest last
+RESULT_MAX = 64
+LOCK = threading.RLock()   # RLock: geometry_version() re-enters under /control
+CLIENT_FILE = os.path.join(HERE, "client-state.json")   # /hello survives restarts
+try:
+    with open(CLIENT_FILE) as _f:
+        _persisted = json.load(_f)
+    if isinstance(_persisted, dict):
+        for _k in ("host", "os", "screen", "primary", "dpi", "dpi_winforms",
+                   "dpi_mode", "readback", "caps", "feed", "at", "client"):
+            if _k in _persisted:
+                CLIENT[_k] = _persisted[_k]
+except Exception:
+    pass
 # Score channel: control events (click/type) the brain forwards for the MARK's
 # machine. Senders poll /control?after=seq and apply them with SendInput.
 CONTROL = collections.deque(maxlen=32)
@@ -74,6 +90,49 @@ def read_latest():
             return f.read()
     except FileNotFoundError:
         return None
+
+
+def jpeg_dims(data):
+    """(w, h) of a JPEG from its SOF marker, or None. Lets the receiver
+    know the ACTUAL emitted frame size (the feed can be adaptive) without
+    decoding — geometry for the feed->desktop map must match the frame."""
+    if not data or len(data) < 4 or data[:2] != b"\xff\xd8":
+        return None
+    i = 2
+    while i + 9 < len(data):
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        seg = (data[i + 2] << 8) | data[i + 3]
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3):
+            h, w = (data[i + 5] << 8) | data[i + 6], (data[i + 7] << 8) | data[i + 8]
+            return (w, h)
+        if marker == 0xDA:
+            return None
+        i += 2 + seg
+    return None
+
+
+def geometry_version():
+    """Stable int over (feed dims, reported screen bounds). Increments only
+    when the real capture geometry changes — drives stale-geometry rejection
+    on the sender side (events computed against an older map must not apply)."""
+    import hashlib
+    with LOCK:
+        f = (int(STATE.get("frame_w") or 0), int(STATE.get("frame_h") or 0))
+        c = dict(CLIENT)
+    sc = c.get("screen") or {}
+    feed = c.get("feed") or {}
+    basis = "|".join(str(v) for v in (
+        f[0], f[1],
+        sc.get("w"), sc.get("h"), sc.get("ox"), sc.get("oy"),
+        feed.get("w"), feed.get("h"),
+        c.get("client", "")))
+    return int(hashlib.sha1(basis.encode()).hexdigest()[:8], 16)
 
 
 class H(BaseHTTPRequestHandler):
@@ -133,7 +192,31 @@ class H(BaseHTTPRequestHandler):
                 pass
         elif self.path.startswith("/state"):
             with LOCK:
-                body = json.dumps(STATE).encode()
+                st = dict(STATE)
+                client_at = CLIENT.get("at")
+            st["client_at"] = client_at
+            st["geometry_version"] = geometry_version()
+            self._send(200, json.dumps(st).encode(), "application/json")
+        elif self.path.startswith("/results"):
+            # Cursor-readback results the sender posts after applying a move
+            # (seq -> {requested/mapped/actual cursor + capture geometry}).
+            # Drive polls /results?seq=N (or plain /results for latest).
+            try:
+                qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+                want = None
+                for kv in qs.split("&"):
+                    if kv.startswith("seq="):
+                        want = int(kv.split("=", 1)[1])
+            except Exception:
+                want = None
+            with LOCK:
+                if want is None:
+                    latest = next(reversed(RESULTS), None)
+                    body = json.dumps({"seq": latest,
+                                       "result": RESULTS.get(latest)}).encode()
+                else:
+                    body = json.dumps({"seq": want,
+                                       "result": RESULTS.get(want)}).encode()
             self._send(200, body, "application/json")
         elif self.path.startswith("/client"):
             # The sender's /hello handshake: real screen bounds + capabilities.
@@ -172,11 +255,16 @@ class H(BaseHTTPRequestHandler):
             with open(tmp, "wb") as f:
                 f.write(data)
             os.replace(tmp, LATEST)
+            dims = jpeg_dims(data)
             with LOCK:
                 STATE["last_frame_at"] = time.time()
                 STATE["frames"] += 1
                 STATE["last_size"] = len(data)
                 STATE["last_client"] = self.client_address[0]
+                if dims:
+                    # ACTUAL emitted frame size is the mapping basis — not the
+                    # sender's nominal feed size, not a hard-coded 1280x720.
+                    STATE["frame_w"], STATE["frame_h"] = dims
             self._send(200, b"ok", "text/plain")
         elif self.path == "/control":
             # Score channel push: brain forwards a click/type (in FEED 1280x720
@@ -192,8 +280,10 @@ class H(BaseHTTPRequestHandler):
                 CSEQ += 1
                 evt["seq"] = CSEQ
                 evt["at"] = time.time()
+                evt["geometry_version"] = geometry_version()
                 CONTROL.append(evt)
-            self._send(200, json.dumps({"ok": True, "seq": evt["seq"]}).encode(),
+            self._send(200, json.dumps({"ok": True, "seq": evt["seq"],
+                                        "geometry_version": evt["geometry_version"]}).encode(),
                        "application/json")
         elif self.path == "/upload":
             # Mark-to-HQ channel: the remote side POSTs a file (e.g. notes,
@@ -226,9 +316,32 @@ class H(BaseHTTPRequestHandler):
                 CLIENT.update(info)
                 CLIENT["client"] = self.client_address[0]
                 CLIENT["at"] = time.time()
+                try:
+                    with open(CLIENT_FILE + ".tmp", "w") as f:
+                        json.dump(CLIENT, f)
+                    os.replace(CLIENT_FILE + ".tmp", CLIENT_FILE)
+                except Exception:
+                    pass
             self._send(200, json.dumps({"ok": True}).encode(), "application/json")
+        elif self.path == "/result":
+            # Sender posts cursor-readback after applying a move:
+            # {"seq":N,"requested_feed":[x,y],"mapped":[x,y],"actual":[x,y],
+            #  "actual_feed":[x,y],"capture":{"w":..,"h":..,"ox":..,"oy":..},
+            #  "dpr":..,"error":null|"...","geometry_version":...}
+            n = int(self.headers.get("Content-Length", 0))
+            try:
+                res = json.loads(self.rfile.read(n))
+                seq = int(res.pop("seq"))
+            except Exception:
+                self._send(400, b"bad result json", "text/plain")
+                return
+            with LOCK:
+                RESULTS[seq] = res
+                while len(RESULTS) > RESULT_MAX:
+                    RESULTS.popitem(last=False)
+            self._send(200, b"ok", "text/plain")
         else:
-            self._send(404, b"only /frame, /control and /upload", "text/plain")
+            self._send(404, b"only /frame, /control, /hello, /result and /upload", "text/plain")
 
 
 def main():
