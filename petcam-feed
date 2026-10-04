@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# petcam launcher: opens the remote-feed window under the pet (float + borderless
+# via the hyprland.lua window rule "petcam-screen").
+# Usage: petcam-feed [width height x y]   (defaults 480x270, parked upper-left
+# of the pet on DP-1)
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+W="${1:-480}"; H="${2:-270}"; X="${3:-2064}"; Y="${4:-890}"
+SRC="${PETCAM_SRC:-http://100.86.251.100:9101/stream.mjpeg}"
+printf '%s\n' 'q quit' 'ESC quit' > "$HERE/input.conf"
+addr() {
+  hyprctl -j clients 2>/dev/null | python3 -c '
+import json,sys
+for c in json.load(sys.stdin):
+    if c.get("title") == "petcam":
+        print(c["address"]); break' 2>/dev/null
+}
+# Re-open instead of stacking: focus existing petcam window if present
+existing=$(addr)
+if [ -n "$existing" ]; then
+    hyprctl dispatch "hl.dsp.focus({ window = \"address:$existing\" })" >/dev/null 2>&1
+    exit 0
+fi
+# mpv's --geometry is ignored on Wayland here; place via dispatchers after map.
+mpv --title=petcam --keep-open=yes --input-conf="$HERE/input.conf" \
+  --no-border "$SRC" &
+MPID=$!
+for i in $(seq 1 25); do
+    a=$(addr)
+    [ -n "$a" ] && break
+    kill -0 "$MPID" 2>/dev/null || break
+    sleep 0.2
+done
+hyprctl dispatch "hl.dsp.window.resize({ x = $W, y = $H })" >/dev/null 2>&1
+hyprctl dispatch "hl.dsp.window.move({ x = $X, y = $Y })" >/dev/null 2>&1
+wait "$MPID"

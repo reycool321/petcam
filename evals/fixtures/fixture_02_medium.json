@@ -1,0 +1,98 @@
+{
+ "request": {
+  "method": "POST",
+  "url": "http://127.0.0.1:8083/v1/chat/completions",
+  "headers": {
+   "Authorization": "Bearer redacted"
+  },
+  "body": {
+   "model": "qwen3.8-27b-uncensored",
+   "messages": [
+    {
+     "role": "user",
+     "content": "mark [user turn 0] please do step 0"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 1"
+    },
+    {
+     "role": "tool",
+     "content": "[tool] ok done"
+    },
+    {
+     "role": "user",
+     "content": "mark [user turn 1] please do step 1"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 2"
+    },
+    {
+     "role": "tool",
+     "content": "[tool] ok done"
+    },
+    {
+     "role": "user",
+     "content": "mark [user turn 2] please do step 2"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 3"
+    },
+    {
+     "role": "tool",
+     "content": "[tool] ok done"
+    },
+    {
+     "role": "user",
+     "content": "mark [user turn 3] please do step 3"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 4"
+    },
+    {
+     "role": "tool",
+     "content": "[tool] ok done"
+    },
+    {
+     "role": "user",
+     "content": "mark [user turn 4] please do step 4"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 5"
+    },
+    {
+     "role": "tool",
+     "content": "[tool] ok done"
+    },
+    {
+     "role": "user",
+     "content": "mark [user turn 5] please do step 5"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 6"
+    },
+    {
+     "role": "tool",
+     "content": "[tool] ok done"
+    },
+    {
+     "role": "user",
+     "content": "mark [user turn 6] please do step 6"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 7"
+    },
+    {
+     "role": "tool",
+     "content": "[tool] ok done"
+    }
+   ]
+  }
+ }
+}

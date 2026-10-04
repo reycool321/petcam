@@ -1,0 +1,110 @@
+{
+ "request": {
+  "method": "POST",
+  "url": "http://127.0.0.1:8083/v1/chat/completions",
+  "headers": {
+   "Authorization": "Bearer redacted"
+  },
+  "body": {
+   "model": "qwen3.8-27b-uncensored",
+   "messages": [
+    {
+     "role": "user",
+     "content": "getaway [user turn 0] please do step 0"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 1"
+    },
+    {
+     "role": "user",
+     "content": "getaway [user turn 1] please do step 1"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 2"
+    },
+    {
+     "role": "user",
+     "content": "getaway [user turn 2] please do step 2"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 3"
+    },
+    {
+     "role": "user",
+     "content": "getaway [user turn 3] please do step 3"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 4"
+    },
+    {
+     "role": "user",
+     "content": "getaway [user turn 4] please do step 4"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 5"
+    },
+    {
+     "role": "user",
+     "content": "getaway [user turn 5] please do step 5"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 6"
+    },
+    {
+     "role": "user",
+     "content": "getaway [user turn 6] please do step 6"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 7"
+    },
+    {
+     "role": "user",
+     "content": "getaway [user turn 7] please do step 7"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 8"
+    },
+    {
+     "role": "user",
+     "content": "getaway [user turn 8] please do step 8"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 9"
+    },
+    {
+     "role": "user",
+     "content": "getaway [user turn 9] please do step 9"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 10"
+    },
+    {
+     "role": "user",
+     "content": "getaway [user turn 10] please do step 10"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 11"
+    },
+    {
+     "role": "user",
+     "content": "getaway [user turn 11] please do step 11"
+    },
+    {
+     "role": "assistant",
+     "content": "[assistant] on it, step 12"
+    }
+   ]
+  }
+ }
+}
