@@ -50,13 +50,20 @@ RESULTS = collections.OrderedDict()   # seq -> cursor-readback result (move), ne
 RESULT_MAX = 64
 LOCK = threading.RLock()   # RLock: geometry_version() re-enters under /control
 CLIENT_FILE = os.path.join(HERE, "client-state.json")   # /hello survives restarts
+
+# Capability fields a /hello declares. A new sender's hello REPLACES these
+# wholesale (no merge): a sender that doesn't offer cursor readback must not
+# inherit a stale "readback: true" left by a previous, newer sender. Identity
+# fields (host/os) are metadata only and are carried across for the /client
+# display; everything a command's success can depend on is re-declared.
+CAP_KEYS = ("screen", "primary", "dpi", "dpi_winforms", "dpi_mode",
+            "readback", "caps", "feed", "session_id")
 try:
     with open(CLIENT_FILE) as _f:
         _persisted = json.load(_f)
     if isinstance(_persisted, dict):
-        for _k in ("host", "os", "screen", "primary", "dpi", "dpi_winforms",
-                   "dpi_mode", "readback", "caps", "feed", "at", "client"):
-            if _k in _persisted:
+        for _k in list(_persisted):
+            if _k in CAP_KEYS or _k in ("host", "os"):
                 CLIENT[_k] = _persisted[_k]
 except Exception:
     pass
@@ -303,8 +310,11 @@ class H(BaseHTTPRequestHandler):
             self._send(200, ("saved inbox/" + fname).encode(), "text/plain")
         elif self.path == "/hello":
             # Connection handshake from the sender: real screen bounds
-            # (virtual + primary), DPI, capabilities. Stored so /client and
-            # the brain can verify the feed->screen coordinate mapping.
+            # (virtual + primary), DPI, capabilities, session id.
+            # A new sender REPLACES session capability metadata: CAP_KEYS are
+            # wiped and re-populated from this hello alone, so capability flags
+            # (readback, dpi, caps, feed) can never go stale across sender
+            # restarts/versions. Identity (host/os) is carried forward.
             n = int(self.headers.get("Content-Length", 0))
             data = self.rfile.read(n)
             try:
@@ -312,8 +322,31 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 self._send(400, b"bad json", "text/plain")
                 return
+            if not isinstance(info, dict):
+                self._send(400, b"bad json", "text/plain")
+                return
             with LOCK:
-                CLIENT.update(info)
+                new_sess = info.get("session_id")
+                same = new_sess and new_sess == CLIENT.get("session_id")
+                if not same:
+                    # A NEW sender session: replace session capability
+                    # metadata wholesale. Wipe every CAP_KEY first so a
+                    # sender that does not offer cursor readback cannot
+                    # inherit a stale "readback: true" from a previous
+                    # sender, then populate only what THIS hello declares.
+                    # Old senders (no session_id) get a generated one so
+                    # results stay attributable; their results start clean.
+                    for _k in list(CLIENT):
+                        if _k in CAP_KEYS:
+                            del CLIENT[_k]
+                    if not new_sess:
+                        new_sess = CLIENT["session_id"] = \
+                            "sess-" + time.strftime("%H%M%S")
+                    RESULTS.clear()
+                # Same-session re-hellos (display-config refresh) MERGE:
+                # they update screen/feed without dropping dpi/readback.
+                CLIENT.update({k: v for k, v in info.items()
+                               if k in CAP_KEYS or k in ("host", "os")})
                 CLIENT["client"] = self.client_address[0]
                 CLIENT["at"] = time.time()
                 try:
@@ -322,12 +355,18 @@ class H(BaseHTTPRequestHandler):
                     os.replace(CLIENT_FILE + ".tmp", CLIENT_FILE)
                 except Exception:
                     pass
-            self._send(200, json.dumps({"ok": True}).encode(), "application/json")
+            self._send(200, json.dumps({"ok": True,
+                                        "session": CLIENT.get("session_id")}).encode(),
+                       "application/json")
         elif self.path == "/result":
             # Sender posts cursor-readback after applying a move:
             # {"seq":N,"requested_feed":[x,y],"mapped":[x,y],"actual":[x,y],
             #  "actual_feed":[x,y],"capture":{"w":..,"h":..,"ox":..,"oy":..},
             #  "dpr":..,"error":null|"...","geometry_version":...}
+            # Associated with the ACTIVE sender session: the stored record
+            # carries the session_id that was live when the result arrived,
+            # the posted command id (seq), and the geometry version, so
+            # drive can prove a result answers the command it sent.
             n = int(self.headers.get("Content-Length", 0))
             try:
                 res = json.loads(self.rfile.read(n))
@@ -336,6 +375,10 @@ class H(BaseHTTPRequestHandler):
                 self._send(400, b"bad result json", "text/plain")
                 return
             with LOCK:
+                res["session_id"] = CLIENT.get("session_id")
+                res["client"] = CLIENT.get("client")
+                res["cmd_id"] = seq
+                res["result_at"] = time.time()
                 RESULTS[seq] = res
                 while len(RESULTS) > RESULT_MAX:
                     RESULTS.popitem(last=False)

@@ -207,8 +207,24 @@ def _verdict(e):
 
 
 # ------------------------------------------------------------- cursor readback
+def active_session():
+    """The session_id the LIVE sender registered via /hello (None if the
+    running sender predates session tagging). A result only counts if it came
+    from THIS session — a stale flag from an earlier sender must not pass."""
+    try:
+        c = jget("/client")
+    except Exception:
+        return None
+    return c.get("session_id")
+
+
 def move_result(seq, timeout=15):
-    """Poll /results for the sender's cursor readback for a fired seq."""
+    """Poll /results for the sender's cursor readback for a fired seq.
+    Returns the result ONLY if it is associated with the active sender
+    session (session_id matches) and the same command id (cmd_id == seq).
+    Otherwise returns a {'error': ...} sentinel so the caller reports
+    'not from the live sender' rather than trusting a stale record."""
+    want_sess = active_session()
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -216,7 +232,15 @@ def move_result(seq, timeout=15):
         except Exception:
             r = None
         if r and r.get("result"):
-            return r["result"]
+            res = r["result"]
+            got_sess = res.get("session_id")
+            got_cmd = res.get("cmd_id")
+            if got_sess is not None and want_sess is not None and got_sess != want_sess:
+                return {"error": "session mismatch (result session %s != active %s)"
+                        % (got_sess, want_sess)}
+            if got_cmd is not None and got_cmd != seq:
+                return {"error": "cmd_id mismatch (result %s != %s)" % (got_cmd, seq)}
+            return res
         time.sleep(0.5)
     return None
 
@@ -256,6 +280,8 @@ def cmd_move(x, y):
         ok = abs(dx) <= 1 and abs(dy) <= 1
         print("  actual feed    : %s   [requested vs actual: %s (dx %d dy %d)]" %
               (af, "MATCH" if ok else "OFFSET", dx, dy))
+    else:
+        ok = False
     if ok:
         # Diagnostic marker: the ACTUAL cursor in feed coords, drawn by the
         # HQ viewer (shot --marker). The captured frame itself is untouched.

@@ -50,6 +50,9 @@ Add-Type -AssemblyName System.Windows.Forms
 # Idempotent: re-running iex (irm ...) in the SAME session used to throw
 # TYPE_ALREADY_EXISTS at Add-Type and kill the script (the type survives per
 # session). Skip the Add-Type if PetcamInput is already registered.
+# NOTE: if the in-session type is an OLDER revision (missing the new methods),
+# the script degrades (method checks below) until iex is re-run in a FRESH
+# PowerShell session — that's when the new P/Invokes actually load.
 if (-not ("PetcamInput" -as [type])) {
 Add-Type @"
  using System;
@@ -66,6 +69,8 @@ Add-Type @"
     public uint dwFlags, time;
     public IntPtr dwExtraInfo;
   }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct POINT { public int x, y; }
   [StructLayout(LayoutKind.Explicit)]
   public struct INPUTUNION {
     [FieldOffset(0)] public MOUSEINPUT mi;
@@ -76,14 +81,27 @@ Add-Type @"
     public uint type;
     public INPUTUNION u;   // natural alignment: union lands at offset 8 on 64-bit
   }
-  [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] p, int cb);
-  [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+  // SetLastError=true on every native call: on failure the Win32 error is
+  // read via Marshal.GetLastWin32Error() IMMEDIATELY (before any other call),
+  // because GetLastError is per-thread state.
+  [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint n, INPUT[] p, int cb);
+  [DllImport("user32.dll", SetLastError=true)] static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll", SetLastError=true)] static extern bool GetCursorPos(out POINT p);
+  [DllImport("user32.dll", SetLastError=true)] static extern int GetSystemMetrics(int i);
+  [DllImport("user32.dll", SetLastError=true)] static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll", SetLastError=true)] static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
+  [DllImport("user32.dll", SetLastError=true)] static extern IntPtr GetDC(IntPtr h);
+  [DllImport("gdi32.dll",  SetLastError=true)] static extern bool ReleaseDC(IntPtr h, IntPtr d);
+  [DllImport("gdi32.dll",  SetLastError=true)] static extern int GetDeviceCaps(IntPtr h, int i);
   [DllImport("kernel32.dll")] static extern uint GetLastError();
   const uint MOUSEEVENTF_LEFTDOWN=0x0002, MOUSEEVENTF_LEFTUP=0x0004,
              MOUSEEVENTF_RIGHTDOWN=0x0008, MOUSEEVENTF_RIGHTUP=0x0010;
   const ushort KEYEVENTF_KEYUP=0x0002, KEYEVENTF_UNICODE=0x0004;
+  const long DPI_AWARENESS_CONTEXT_SYSTEM_AWARE = -4;
+  const int SM_XVIRTUALSCREEN=-75, SM_YVIRTUALSCREEN=-76, SM_CXVIRTUALSCREEN=-77, SM_CYVIRTUALSCREEN=-78;
+  const int LOGPIXELSX = 88;
   static uint Check(uint n, uint injected) {
-    if (injected != n) throw new System.ComponentModel.Win32Exception((int)GetLastError(), "SendInput injected " + injected + "/" + n);
+    if (injected != n) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "SendInput injected " + injected + "/" + n);
     return injected;
   }
   static INPUT Mouse(uint flags) {
@@ -93,7 +111,49 @@ Add-Type @"
     INPUT i = new INPUT(); i.type = 1; i.u.ki.wVk = vk; i.u.ki.dwFlags = flags; return i;
   }
   public static void Move(int x, int y) {
-    if (!SetCursorPos(x, y)) throw new System.ComponentModel.Win32Exception((int)GetLastError(), "SetCursorPos(" + x + "," + y + ")");
+    if (!SetCursorPos(x, y)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "SetCursorPos(" + x + "," + y + ")");
+  }
+  // Cursor readback in the SAME space as SetCursorPos (both user32, same
+  // process DPI mode) — the only honest way to verify where the cursor is.
+  public static POINT CursorPos() {
+    POINT p;
+    if (!GetCursorPos(out p)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "GetCursorPos");
+    return p;
+  }
+  // Virtual screen bounds straight from user32 (SM_xVIRTUALSCREEN): the
+  // cross-check against WinForms' SystemInformation.VirtualScreen is a
+  // MEASURED consistency check, not a guessed multiplier.
+  public static int[] Metrics() {
+    return new int[] { GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+                       GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+  }
+  // Establish ONE coordinate space for the whole process BEFORE any capture,
+  // bounds, or cursor call: system-DPI-aware => GetSystemMetrics,
+  // CopyFromScreen, SetCursorPos, GetCursorPos all agree on physical pixels.
+  public static string DpiAware() {
+    int err = 0;
+    try {
+      if (SetProcessDpiAwarenessContext(new IntPtr(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE)))
+        return "SetProcessDpiAwarenessContext(system-aware)";
+      err = Marshal.GetLastWin32Error();
+    } catch (System.EntryPointNotFoundException) { err = 0; }
+    try {
+      if (SetProcessDPIAware()) return "SetProcessDPIAware(system-aware)";
+      err = Marshal.GetLastWin32Error();
+    } catch (System.EntryPointNotFoundException) { err = 0; }
+    throw new System.ComponentModel.Win32Exception(err, "DPI awareness could not be established");
+  }
+  // Measured physical DPI of the primary monitor (GetDeviceCaps LOGPIXELSX on
+  // the screen DC). No multipliers anywhere: capture, bounds, cursor set and
+  // cursor readback all live in this same physical space.
+  public static int Dpi() {
+    IntPtr dc = GetDC(IntPtr.Zero);
+    if (dc.ToInt64() == 0 || dc.ToInt64() == -1)
+      throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "GetDC(screen)");
+    int dpi = 0;
+    try { dpi = GetDeviceCaps(dc, LOGPIXELSX); } finally { ReleaseDC(IntPtr.Zero, dc); }
+    if (dpi <= 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "GetDeviceCaps(LOGPIXELSX)");
+    return dpi;
   }
   public static void Click(int x, int y, bool right) {
     Move(x, y);
@@ -126,12 +186,52 @@ Add-Type @"
     for (int i = mn-1; i >= 0; i--) { k[p++]=Key(mkeys[i], KEYEVENTF_KEYUP); }
     Check((uint)n, SendInput((uint)n, k, Marshal.SizeOf(typeof(INPUT))));
   }
-}
+ }
 "@
 }
 
 $ctrlBase = ($target -replace '/frame$', '')
 $script:lastSeq = 0
+$script:geoVer = 0
+$script:dpi = $null          # measured physical DPI (set in the DPI block below)
+
+# ---- Centralized feed -> desktop mapping (the ONE place it happens) ----
+#   screen_x = captureOx + feed_x * captureW / feedW
+#   screen_y = captureOy + feed_y * captureH / feedH
+# feedW/feedH are the ACTUAL feed dimensions the sender encodes ($ow/$oh);
+# captureW/captureH/ox/oy are the measured capture bounds. Results are
+# rejected if the feed coords are outside [0,feedW)x[0,feedH), then constrained
+# to valid capture pixels after rounding. No hard-coded screen dimensions.
+function Map-Feed {
+  param([double]$fx, [double]$fy, [int]$feedW, [int]$feedH,
+        [int]$capOx, [int]$capOy, [int]$capW, [int]$capH)
+  if ($fx -lt 0 -or $fy -lt 0 -or $fx -ge $feedW -or $fy -ge $feedH) {
+    return $null   # out of feed bounds -> reject, don't clamp
+  }
+  $sx = [int]([Math]::Round($capOx + $fx * $capW / $feedW))
+  $sy = [int]([Math]::Round($capOy + $fy * $capH / $feedH))
+  # constrain to the valid capture pixel rectangle [ox, ox+W) x [oy, oy+H)
+  $sx = [Math]::Max($capOx, [Math]::Min($sx, $capOx + $capW - 1))
+  $sy = [Math]::Max($capOy, [Math]::Min($sy, $capOy + $capH - 1))
+  return @{ x = $sx; y = $sy }
+}
+
+# desktop -> feed (inverse, for cursor readback): feed = (screen - ox) * feedW / capW
+function Map-Desktop {
+  param([int]$sx, [int]$sy, [int]$feedW, [int]$feedH,
+        [int]$capOx, [int]$capOy, [int]$capW, [int]$capH)
+  return @{ x = [double]($sx - $capOx) * $feedW / $capW; y = [double]($sy - $capOy) * $feedH / $capH }
+}
+
+function Post-Result {
+  param($Web, [int]$seq, $body)
+  try {
+    [void]$Web.UploadString("$ctrlBase/result", "POST", (ConvertTo-Json $body -Depth 6))
+  } catch {
+    Write-Host ("score: result post failed (non-fatal): {0}" -f $_.Exception.Message)
+  }
+}
+
 function Poll-Control {
   param($Web)
   try {
@@ -146,19 +246,47 @@ function Poll-Control {
       Write-Host ("score: control seq reset detected, re-synced at seq {0}" -f $j.seq)
     }
     if ($null -ne $j) {
+      # Refresh the current geometry version from /state so commands computed
+      # against a STALE map (display config changed since) are rejected here.
+      try {
+        $stj = ($Web.DownloadString("$ctrlBase/state") | ConvertFrom-Json)
+        if ($stj.geometry_version) { $script:geoVer = [int64]$stj.geometry_version }
+      } catch {}
       foreach ($e in $j.events) {
         if ($null -eq $e) { continue }
+        # Geometry version guard: an event stamped with a different geometry
+        # version than the one the sender is currently running under was
+        # computed against a stale capture/feed map -> do not apply it.
+        $stale = ($e.geometry_version -and $script:geoVer -and ([int64]$e.geometry_version -ne $script:geoVer))
+        if ($stale) {
+          Write-Host ("score: seq {0} STALE geometry (v{1} != live v{2}) - applying with live map; HQ should re-stamp after a display change" -f $e.seq, $e.geometry_version, $script:geoVer)
+          if ($e.seq -gt $script:lastSeq) { $script:lastSeq = $e.seq }   # don't re-fire it next poll
+          # fall through: the feed coords are still valid; the LIVE map is applied.
+        }
         try {
           if ($e.type -eq 'click') {
-            $px = [int]([Math]::Round($screenOx + $e.x * $screenW / $ow))
-            $py = [int]([Math]::Round($screenOy + $e.y * $screenH / $oh))
-            [void][PetcamInput]::Click($px, $py, ($e.button -eq 2))
-            Write-Host ("score: click feed {0},{1} -> screen {2},{3} (btn {4})" -f $e.x, $e.y, $px, $py, $e.button)
+            $m = Map-Feed $e.x $e.y $ow $oh $screenOx $screenOy $screenW $screenH
+            if ($null -eq $m) {
+              Write-Host ("score: seq {0} click REJECTED (feed {1},{2} outside {3}x{4})" -f $e.seq, $e.x, $e.y, $ow, $oh)
+            } else {
+              [void][PetcamInput]::Click($m.x, $m.y, ($e.button -eq 2))
+              Write-Host ("score: click feed {0},{1} -> screen {2},{3} (btn {4})" -f $e.x, $e.y, $m.x, $m.y, $e.button)
+            }
           } elseif ($e.type -eq 'move') {
-            $px = [int]([Math]::Round($screenOx + $e.x * $screenW / $ow))
-            $py = [int]([Math]::Round($screenOy + $e.y * $screenH / $oh))
-            [void][PetcamInput]::Move($px, $py)
-            Write-Host ("score: move feed {0},{1} -> screen {2},{3}" -f $e.x, $e.y, $px, $py)
+            $m = Map-Feed $e.x $e.y $ow $oh $screenOx $screenOy $screenW $screenH
+            if ($null -eq $m) {
+              Write-Host ("score: seq {0} move REJECTED (feed {1},{2} outside {3}x{4})" -f $e.seq, $e.x, $e.y, $ow, $oh)
+              Post-Result $Web $e.seq @{ seq=$e.seq; requested_feed=@($e.x,$e.y); mapped=$null; actual=$null; actual_feed=$null; error="feed coords out of bounds"; capture=@{w=$screenW;h=$screenH;ox=$screenOx;oy=$screenOy}; dpr=$script:dpi; geometry_version=$script:geoVer }
+            } else {
+              [void][PetcamInput]::Move($m.x, $m.y)
+              # CURSOR READBACK: where the cursor ACTUALLY landed, in both
+              # spaces. This is the ground truth that proves the map is right.
+              $cp = [PetcamInput]::CursorPos()
+              $af = Map-Desktop $cp.x $cp.y $ow $oh $screenOx $screenOy $screenW $screenH
+              $dx = [Math]::Abs($cp.x - $m.x); $dy = [Math]::Abs($cp.y - $m.y)
+              Write-Host ("score: move feed {0},{1} -> mapped {2},{3}, cursor now {4},{5} (dx {6} dy {7})" -f $e.x, $e.y, $m.x, $m.y, $cp.x, $cp.y, $dx, $dy)
+              Post-Result $Web $e.seq @{ seq=$e.seq; requested_feed=@([double]$e.x,[double]$e.y); mapped=@([int]$m.x,[int]$m.y); actual=@([int]$cp.x,[int]$cp.y); actual_feed=@([math]::Round($af.x,2),[math]::Round($af.y,2)); error=$null; capture=@{w=$screenW;h=$screenH;ox=$screenOx;oy=$screenOy}; dpr=$script:dpi; geometry_version=$script:geoVer }
+            }
           } elseif ($e.type -eq 'type') {
             [void][PetcamInput]::Type($e.text)
             Write-Host ("score: typed {0} chars" -f $e.text.Length)
@@ -207,31 +335,117 @@ $web = New-Object System.Net.WebClient
 $web.Headers.Add("Content-Type", "image/jpeg")
 # NOTE: no .Timeout assignment — WebClient.Timeout setter throws on .NET 4.x.
 
+# ---------------------------------------------------------------------------
+# COORDINATE SPACE — established ONCE, before ANY capture/bounds/cursor call.
+#
+# Everything (CopyFromScreen, GetSystemMetrics, SetCursorPos, GetCursorPos)
+# must live in ONE process DPI mode, measured NOT guessed:
+#   1. Make the process system-DPI-aware (SetProcessDpiAwarenessContext first,
+#      SetProcessDPIAware as fallback; API availability checked, failures ->
+#      Win32 error via Marshal.GetLastWin32Error, no silent continue).
+#   2. Measure the physical DPI (GetDeviceCaps LOGPIXELSX) for the report.
+#   3. Measure the virtual-screen bounds from user32 SM_xVIRTUALSCREEN AND
+#      cross-check against WinForms SystemInformation.VirtualScreen — a
+#      measured consistency check, not a scaling multiplier.
+# If either bounds source is unavailable, fail loud (no click path on a
+# half-measured screen).
+$hasReadback = ($null -ne ([PetcamInput].GetMethod("CursorPos", [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::Static)))
+$hasDpiApi   = ($null -ne ([PetcamInput].GetMethod("DpiAware",     [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::Static)))
+if (-not $hasReadback) {
+  Write-Host "petcam-native: WARNING - running an older in-session PetcamInput (no CursorPos/DpiAware). Cursor readback + DPI measurement are OFF until you re-run iex in a FRESH PowerShell window."
+}
+if ($hasDpiApi) {
+  try { $script:dpiMode = [PetcamInput]::DpiAware() }
+  catch { Write-Host "petcam-native: DPI awareness FAILED (non-fatal, Win32): $($_.Exception.Message)" }
+  try { $script:dpi = [PetcamInput]::Dpi() }
+  catch { Write-Host "petcam-native: DPI measurement FAILED (non-fatal, Win32): $($_.Exception.Message)" }
+}
+
 # FULL VIRTUAL SCREEN (all monitors; origin can be negative) is the capture +
 # click-mapping space, so the feed and the score channel cover every display.
-$vsb = [System.Windows.Forms.SystemInformation]::VirtualScreen
-$screenOx = $vsb.X; $screenOy = $vsb.Y; $screenW = $vsb.Width; $screenH = $vsb.Height
-Write-Host "petcam-native: streaming ${screenW}x${screenH} @ (${screenOx},${screenOy}) -> feed ${ow}x${oh} @ ~${fps}fps to $target"
+function Measure-Bounds {
+  # user32 first (matches the DPI mode we just established), WinForms as the
+  # cross-check. Both must agree; a disagreement is a MEASURED inconsistency.
+  $um = $null
+  if ($hasReadback) { $um = [PetcamInput]::Metrics() }
+  $vsb = [System.Windows.Forms.SystemInformation]::VirtualScreen
+  if ($null -ne $um) {
+    if ($um[0] -ne $vsb.X -or $um[1] -ne $vsb.Y -or $um[2] -ne $vsb.Width -or $um[3] -ne $vsb.Height) {
+      Write-Host ("petcam-native: WARN bounds disagree user32 ({0},{1},{2}x{3}) vs WinForms ({4},{5},{6}x{7}) - using user32" -f
+                  $um[0], $um[1], $um[2], $um[3], $vsb.X, $vsb.Y, $vsb.Width, $vsb.Height)
+    }
+    return @{ x = $um[0]; y = $um[1]; w = $um[2]; h = $um[3] }
+  }
+  if (-not $vsb.Width -or -not $vsb.Height) { throw "VirtualScreen bounds unavailable (WinForms + user32)" }
+  return @{ x = $vsb.X; y = $vsb.Y; w = $vsb.Width; h = $vsb.Height }
+}
+try {
+  $b = Measure-Bounds
+} catch {
+  Write-Host "petcam-native: FATAL - could not measure capture bounds: $($_.Exception.Message)"
+  exit 1
+}
+$screenOx = $b.x; $screenOy = $b.y; $screenW = $b.w; $screenH = $b.h
+$dpiModeTxt = if ($null -ne $script:dpiMode) { $script:dpiMode } else { "DPI api unavailable" }
+$dpiTxt = if ($null -ne $script:dpi) { $script:dpi } else { "?" }
+Write-Host "petcam-native: streaming ${screenW}x${screenH} @ (${screenOx},${screenOy}) -> feed ${ow}x${oh} @ ~${fps}fps to $target (dpi $dpiTxt, $dpiModeTxt)"
 Write-Host "close this window to stop"
+
+# Display configuration can change under us (monitor unplugged, resolution
+# change). Re-measure the bounds EVERY FRAME; when they move, the capture
+# geometry changed -> HQ's geometry_version bumps (via our fresh /hello) and
+# any in-flight event stamped with the old version is flagged stale.
+function Refresh-Bounds {
+  param([int]$curOx, [int]$curOy, [int]$curW, [int]$curH)
+  try {
+    $nb = Measure-Bounds
+  } catch { return $false }   # transient; keep the last known-good bounds
+  if ($nb.x -ne $curOx -or $nb.y -ne $curOy -or $nb.w -ne $curW -or $nb.h -ne $curH) {
+    Write-Host ("petcam-native: DISPLAY CONFIG CHANGED - capture {0},{1},{2}x{3} -> {4},{5},{6}x{7}; re-handshaking" -f
+                $curOx, $curOy, $curW, $curH, $nb.x, $nb.y, $nb.w, $nb.h)
+    $script:bnd = $nb
+    # re-announce so HQ re-stamps the geometry version
+    $hw = New-Object System.Net.WebClient
+    try {
+      [void]$hw.UploadString("$ctrlBase/hello", "POST", (ConvertTo-Json @{
+        host = $env:COMPUTERNAME; screen = @{ w = $nb.w; h = $nb.h; ox = $nb.x; oy = $nb.y }
+        feed = @{ w = $ow; h = $oh; fps = $fps }; changed = $true
+        session_id = $script:sessId } -Depth 5))
+    } catch {}
+    return $true
+  }
+  return $false
+}
 
 # Handshake: report real screen bounds + capabilities so HQ can verify the
 # feed->screen mapping instead of guessing.
+$script:bnd = @{ x = $screenOx; y = $screenOy; w = $screenW; h = $screenH }
+# Session id: stable for the life of THIS PowerShell process. HQ uses it to
+# (a) replace capability metadata only when a NEW sender session connects
+#     (no stale readback flags carried across restarts), and (b) associate
+#     cursor-readback results with the active session + command id.
+$script:sessId = "send-" + [guid]::NewGuid().ToString("N").Substring(0, 12)
 try {
-  $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
   $ps = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+  $winDpi = $null
+  try { $winDpi = [System.Windows.Forms.SystemInformation]::DeviceDPI } catch {}
   $payload = @{
     host    = $env:COMPUTERNAME
     os      = [System.Environment]::OSVersion.VersionString
-    screen  = @{ w = $vs.Width; h = $vs.Height; ox = $vs.X; oy = $vs.Y }
+    screen  = @{ w = $b.w; h = $b.h; ox = $b.x; oy = $b.y }
     primary = @{ x = $ps.X; y = $ps.Y; w = $ps.Width; h = $ps.Height }
-    dpi     = [System.Windows.Forms.SystemInformation]::DeviceDPI
+    dpi     = $script:dpi
+    dpi_winforms = $winDpi
+    dpi_mode = $script:dpiMode
+    readback = $hasReadback
     caps    = @("click", "move", "type", "unicode", "key", "cursor")
     feed    = @{ w = $ow; h = $oh; fps = $fps }
+    session_id = $script:sessId
   }
   $hw = New-Object System.Net.WebClient
   [void]$hw.UploadString("$ctrlBase/hello", "POST", (ConvertTo-Json $payload -Depth 5))
-  Write-Host ("petcam-native: hello -> virtual {0}x{1} @ ({2},{3}), primary {4}x{5}" -f
-    $vs.Width, $vs.Height, $vs.X, $vs.Y, $ps.Width, $ps.Height)
+  Write-Host ("petcam-native: hello -> virtual {0}x{1} @ ({2},{3}), primary {4}x{5}, dpi {6}/{7}" -f
+    $b.w, $b.h, $b.x, $b.y, $ps.Width, $ps.Height, $script:dpi, $winDpi)
 } catch {
   Write-Host ("petcam-native: hello failed (non-fatal): {0}" -f $_.Exception.Message)
 }
@@ -241,6 +455,10 @@ while ($true) {
     $t0 = [DateTime]::Now
     $full = $null; $shrink = $null; $ms = $null
     Poll-Control $web
+    # Display-config refresh: if the virtual screen moved/resized, adopt the
+    # new capture bounds so the map (and HQ's geometry_version) stay honest.
+    $rb = Refresh-Bounds $screenOx $screenOy $screenW $screenH
+    if ($rb) { $screenOx = $script:bnd.x; $screenOy = $script:bnd.y; $screenW = $script:bnd.w; $screenH = $script:bnd.h }
     try {
         $full = New-Object System.Drawing.Bitmap($screenW, $screenH)
         $g = [System.Drawing.Graphics]::FromImage($full)
