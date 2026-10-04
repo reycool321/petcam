@@ -6,6 +6,7 @@ Endpoints:
   /stream.mjpeg   GET   live multipart/x-mjpeg loop (mpv plays this)
   /state          GET   JSON stats
 Binds to the tailscale0 IP only. Plain stdlib; no Hermes, no deps."""
+import collections
 import json
 import os
 import sys
@@ -17,6 +18,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 LATEST = os.path.join(HERE, "latest.jpg")
 STATE = {"last_frame_at": 0.0, "frames": 0, "last_size": 0, "last_client": "?"}
 LOCK = threading.Lock()
+# Score channel: control events (click/type) the brain forwards for the MARK's
+# machine. Senders poll /control?after=seq and apply them with SendInput.
+CONTROL = collections.deque(maxlen=32)
+CSEQ = 0
 
 PAGE = b"""<!doctype html><meta charset="utf-8"><title>petcam</title>
 <body style="margin:0;background:#000;color:#9fe"><pre id=s style="position:fixed;top:0;left:0;font:12px monospace;z-index:2"></pre>
@@ -104,28 +109,60 @@ class H(BaseHTTPRequestHandler):
             with LOCK:
                 body = json.dumps(STATE).encode()
             self._send(200, body, "application/json")
+        elif self.path.startswith("/control"):
+            # Score channel poll: events after a sequence number (senders apply
+            # them with SendInput on the mark's machine; ack by polling onward).
+            after = 0
+            try:
+                qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+                for kv in qs.split("&"):
+                    if kv.startswith("after="):
+                        after = int(kv.split("=", 1)[1])
+            except Exception:
+                after = 0
+            with LOCK:
+                body = json.dumps({"seq": CSEQ,
+                                   "events": [e for e in CONTROL if e["seq"] > after]}).encode()
+            self._send(200, body, "application/json")
         else:
             self._send(200, PAGE, "text/html")
 
     def do_POST(self):
-        if self.path != "/frame":
-            self._send(404, b"only /frame", "text/plain")
-            return
-        n = int(self.headers.get("Content-Length", 0))
-        data = self.rfile.read(n)
-        if not data or data[:3] != b"\xff\xd8\xff":
-            self._send(400, b"not a jpeg", "text/plain")
-            return
-        tmp = LATEST + ".tmp"
-        with open(tmp, "wb") as f:
-            f.write(data)
-        os.replace(tmp, LATEST)
-        with LOCK:
-            STATE["last_frame_at"] = time.time()
-            STATE["frames"] += 1
-            STATE["last_size"] = len(data)
-            STATE["last_client"] = self.client_address[0]
-        self._send(200, b"ok", "text/plain")
+        if self.path == "/frame":
+            n = int(self.headers.get("Content-Length", 0))
+            data = self.rfile.read(n)
+            if not data or data[:3] != b"\xff\xd8\xff":
+                self._send(400, b"not a jpeg", "text/plain")
+                return
+            tmp = LATEST + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, LATEST)
+            with LOCK:
+                STATE["last_frame_at"] = time.time()
+                STATE["frames"] += 1
+                STATE["last_size"] = len(data)
+                STATE["last_client"] = self.client_address[0]
+            self._send(200, b"ok", "text/plain")
+        elif self.path == "/control":
+            # Score channel push: brain forwards a click/type (in FEED 1280x720
+            # space). Senders poll /control?after=N and apply via SendInput.
+            n = int(self.headers.get("Content-Length", 0))
+            try:
+                evt = json.loads(self.rfile.read(n))
+            except Exception:
+                self._send(400, b"bad json", "text/plain")
+                return
+            global CSEQ
+            with LOCK:
+                CSEQ += 1
+                evt["seq"] = CSEQ
+                evt["at"] = time.time()
+                CONTROL.append(evt)
+            self._send(200, json.dumps({"ok": True, "seq": evt["seq"]}).encode(),
+                       "application/json")
+        else:
+            self._send(404, b"only /frame and /control", "text/plain")
 
 
 def main():

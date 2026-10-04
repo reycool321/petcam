@@ -6,7 +6,7 @@
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 W="${1:-480}"; H="${2:-270}"; X="${3:-2064}"; Y="${4:-890}"
 SRC="${PETCAM_SRC:-http://100.86.251.100:9101/stream.mjpeg}"
-printf '%s\n' 'q quit' 'ESC quit' > "$HERE/input.conf"
+printf '%s\n' 'q quit' 'ESC quit' 'MOUSE_BTN0 ignore' 'MOUSE_BTN1 ignore' 'MOUSE_BTN2 ignore' 'MOUSE_BTN3 ignore' 'MOUSE_BTN4 ignore' 'MOUSE_BTN5 ignore' > "$HERE/input.conf"
 addr() {
   hyprctl -j clients 2>/dev/null | python3 -c '
 import json,sys

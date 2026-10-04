@@ -24,10 +24,12 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 CMD_FILE = os.path.join(HERE, "cmd.json")
 STATE_URL = os.environ.get("PETCAM_STATE", "http://100.86.251.100:9101/state")
+CONTROL_URL = os.environ.get("PETCAM_CONTROL", "http://100.86.251.100:9101/control")
 POLL = 2.0
 STALE_AFTER = 5.0          # seconds without a new frame before "stale"
 PLACEHOLDER_IP = "100.86.251.100"   # our own IP => placeholder feed
 PET_AGENT = "laptop"        # the pet's agent-state key for the remote machine
+PET_POS_FILE = os.path.expanduser("~/.local/state/omarchy/pets/position.json")
 
 _omarchy_shell = shutil.which("omarchy-shell") or "omarchy-shell"
 
@@ -55,6 +57,103 @@ def fetch_state():
             return json.load(r)
     except Exception:
         return None
+
+
+FEED_W, FEED_H = 1280, 720        # source frame space the senders emit
+
+
+def ensure_ydotoold():
+    """ydotool needs the uinput daemon; start it if absent (plain sudo works here)."""
+    if shutil.which("ydotoold") or subprocess.run(
+            ["pgrep", "-x", "ydotoold"], capture_output=True).returncode == 0:
+        return True
+    try:
+        subprocess.run(["sudo", "ydotoold"], capture_output=True, timeout=5)
+        return True
+    except Exception:
+        return False
+
+
+def window_geom():
+    """Live petcam window geometry (at x,y / size w,h); fallback to the defaults."""
+    try:
+        out = subprocess.run(["hyprctl", "-j", "clients"],
+                             capture_output=True, text=True, timeout=4).stdout
+        for c in json.loads(out):
+            if c.get("title") == "petcam":
+                return (c["at"][0], c["at"][1], c["size"][0], c["size"][1])
+    except Exception:
+        pass
+    return (2064, 890, 480, 270)
+
+
+def screen_geom():
+    """Primary monitor size on the HQ box (fallback 1920x1080)."""
+    try:
+        out = subprocess.run(["hyprctl", "-j", "monitors"],
+                             capture_output=True, text=True, timeout=4).stdout
+        m = json.loads(out)[0]
+        return (int(m["width"]), int(m["height"]))
+    except Exception:
+        return (1920, 1080)
+
+
+def pet_pointer(feed_x=None, feed_y=None):
+    """The pet's position IS the pointer: the spotter stands beside/over the
+    feed, so the crosshair on the mark's screen = the pet's location relative
+    to the feed viewport, mapped 1:1 into feed space (1280x720) and clamped.
+    feed_x/feed_y override for a one-shot aim (pet stays put)."""
+    if feed_x is not None and feed_y is not None:
+        return feed_x, feed_y
+    px = py = None
+    try:
+        pos = json.load(open(PET_POS_FILE))
+        for mon in ("DP-1", "HDMI-A-1"):
+            if mon in pos:
+                px, py = pos[mon]["x"], pos[mon]["y"]
+                break
+    except Exception:
+        pass
+    if px is None:
+        px, py = 2304, 1246            # known default anchor
+    wx, wy, ww, wh = window_geom()
+    fx = (px - wx) / ww * FEED_W if ww else FEED_W / 2
+    fy = (py - wy) / wh * FEED_H if wh else FEED_H / 2
+    return fx, fy
+
+
+def push_control(evt):
+    """Push a control event to the receiver for the sender to apply on the
+    mark's machine. Returns the receiver's reply (seq) or an error string."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            CONTROL_URL, data=json.dumps(evt).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return "fired (seq " + str(json.load(r).get("seq")) + ")"
+    except Exception as e:
+        return "control down: " + str(e)
+
+
+def inject_click(feed_x=None, feed_y=None, button=1):
+    """Score, via the pet: pointer = where the spotter stands (or the aim
+    override), mapped into feed space and pushed down the control channel.
+    The SENDER applies it on the mark's own screen (SendInput) — no loop."""
+    fx, fy = pet_pointer(feed_x, feed_y)
+    fx = min(max(fx, 0), FEED_W); fy = min(max(fy, 0), FEED_H)
+    res = push_control({"type": "click", "x": fx, "y": fy, "button": button})
+    return f"score: crosshair {fx},{fy} (spotter spot) -> {res}"
+
+
+def inject_type(text):
+    """Score, via the pet: the cursor moves to the crosshair (the spotter's
+    spot), then keystrokes land there — so whatever is under the crosshair
+    on the mark's screen receives the typing."""
+    fx, fy = pet_pointer()
+    fx = min(max(int(fx), 0), FEED_W); fy = min(max(int(fy), 0), FEED_H)
+    res = push_control({"type": "type", "text": text, "x": fx, "y": fy})
+    return f"score: typed {len(text)} chars at crosshair {fx},{fy} -> {res}"
 
 
 def main():
@@ -115,9 +214,16 @@ def handle_cmd(cmd):
     elif c == "state":
         pet_state(str(cmd.get("state", "idle")))
     elif c == "click":
-        # Phase 2: forward a click into the remote machine. For now we surface it
-        # as a thought; real injection lands when the control channel exists.
-        pet_think(f"click @ {cmd.get('x')},{cmd.get('y')} (pending control link)")
+        # The score, via the pet: where the spotter stands IS the crosshair on
+        # the mark's screen. cmd "x"/"y" (feed 1280x720 space) aim a one-shot
+        # override; omitted => fire exactly where the pet currently stands.
+        # The event goes to the receiver's control channel; the sender applies
+        # it on the MARK's machine (SendInput) — no self-referential HQ click.
+        fx = float(cmd["x"]) if "x" in cmd else None
+        fy = float(cmd["y"]) if "y" in cmd else None
+        pet_think(inject_click(fx, fy, int(cmd.get("button", 1))))
+    elif c == "type":
+        pet_think(inject_type(str(cmd.get("text", ""))))
     elif c == "loot":
         # Heist move: carry the mark's agent memory back to HQ. DATA ONLY  -
         # read the hermes session store off disk (no Hermes process in the loop),
