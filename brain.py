@@ -16,6 +16,7 @@ the pet stays a stock Omarchy plugin  - nothing custom is patched into it.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,9 @@ STATE_URL = os.environ.get("PETCAM_STATE", "http://100.86.251.100:9101/state")
 LATEST_URL = os.environ.get("PETCAM_LATEST", "http://100.86.251.100:9101/latest.jpg")
 CONTROL_URL = os.environ.get("PETCAM_CONTROL", "http://100.86.251.100:9101/control")
 CLIENT_URL = os.environ.get("PETCAM_CLIENT", "http://100.86.251.100:9101/client")
-POLL = 2.0
+BOOKEND_URL = os.environ.get("PETCAM_BOOKEND", "http://100.86.251.100:9101/bookend")
+PAUSE_URL = os.environ.get("PETCAM_PAUSE", "http://100.86.251.100:9101/pause")
+POLL = 0.4
 STALE_AFTER = 5.0          # seconds without a new frame before "stale"
 PLACEHOLDER_IP = "100.86.251.100"   # our own IP => placeholder feed
 PET_AGENT = "laptop"        # the pet's agent-state key for the remote machine
@@ -39,6 +42,9 @@ FEED_W, FEED_H = 1280, 720   # fallback only. refresh_feed_dims() overrides from
                              # received frames, not the sender's nominal claim).
                              # All aim math must use these — never the literal.
 GEO = {"v": None, "at": 0.0}  # current geometry version (refreshed per poll)
+
+ROUTINES_DIR = os.path.join(HERE, "routines")   # saved task artifacts (improvement #1)
+ACTIVE_TASK = None   # task being captured: {"name","t0","journal_lines","frame_before"}
 
 
 def refresh_feed_dims():
@@ -258,6 +264,11 @@ def push_control(evt):
             reply = json.load(r)
         extra = " (geo " + str(reply["geometry_version"]) + ")" \
                 if reply.get("geometry_version") else ""
+        if reply.get("held"):
+            # Enqueued while the mark is PAUSED: the sender drains (drops) it
+            # without applying. Say it LOUD so nobody thinks a held action
+            # landed.
+            return "HELD (pause ON) - NOT applied, dropped, not replayed (seq " + str(reply.get("seq")) + ")"
         return "fired (seq " + str(reply.get("seq")) + ")" + extra
     except Exception as e:
         return "control down: " + str(e)
@@ -288,16 +299,21 @@ def _thumb(jpeg_bytes):
 def journal(entry):
     """Append one action->outcome line to journal.jsonl (the harness's
     eval/learning data). Never throws. Large transient fields (frame images)
-    are stripped before the line is written."""
+    are stripped before the line is written. While a task capture window is
+    open (task_start..task_end), each step is ALSO copied into the active
+    routine artifact (improvement #1) — the slice that becomes the replay."""
     try:
         row = {k: v for k, v in entry.items() if k not in ("before_img",)}
         with open(JOURNAL, "a") as f:
             f.write(json.dumps(row) + "\n")
+        c = row.get("cmd")
+        if ACTIVE_TASK is not None and c not in ("task_start", "task_end"):
+            ACTIVE_TASK["journal_lines"].append(row)
     except Exception:
         pass
 
 
-def verify_action(entry, settle=1.5):
+def verify_action(entry, settle=0.6):
     """Close the loop on a fired action: did the mark's screen actually
     respond? `entry["before_img"]` holds the pre-action frame bytes. Sleeps
     `settle` for the sender to apply + a new frame to arrive, then measures
@@ -327,6 +343,100 @@ def verify_action(entry, settle=1.5):
     entry["changed"] = diff > 0.005   # ~1 pixel in 200: below that = no response
     journal(entry)
     return diff
+
+
+# --- Improvement #1: save one successful agent-issued command sequence as an
+# external, replayable routine. The TRIGGER is explicit, not detected: the
+# agent (or a person) declares task_start before the steps and task_end AFTER
+# the outcome check (#3) passes. The brain's job in between is pure data
+# capture: journal the steps, stamp before/after frames (bookends), and at
+# task_end package the artifact (steps + frames + check) under routines/.
+# Nothing here touches the sender; the replay path is its own script.
+
+def _bookend(label):
+    """Stamp the receiver's currently-stored frame as the before/after
+    boundary of the capture window (returns {n, sha1, at} or None)."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(BOOKEND_URL,
+                data=json.dumps({"label": label}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return json.load(r)
+    except Exception:
+        return None
+
+
+def _save_frame(bk, path):
+    """Copy the stored frame file for a bookend entry into the routine dir."""
+    if not bk:
+        return None
+    try:
+        src = os.path.join(HERE, "inbox", "frames",
+                           "frame-%08d-%s.jpg" % (int(bk["n"]), bk["sha1"]))
+        if os.path.exists(src):
+            shutil.copy(src, path)
+            return os.path.basename(path)
+    except Exception:
+        pass
+    return None
+
+
+def task_start(name):
+    """Open a capture window for task `name`. Stamps t0 + the before frame."""
+    global ACTIVE_TASK
+    if ACTIVE_TASK is not None:
+        return "task: already capturing %r (task_end it first)" % ACTIVE_TASK["name"]
+    bk = _bookend("before")
+    entry = {"t": time.time(), "cmd": "task_start", "name": str(name),
+             "frame_before": (bk.get("sha1") if bk else None)}
+    ACTIVE_TASK = {"name": str(name), "t0": time.time(), "journal_lines": [],
+                   "frame_before": bk}
+    res = "task: capturing %r (before frame %s)" % (name, entry["frame_before"] or "none")
+    entry["result"] = res
+    journal(entry)
+    return res
+
+
+def task_end(name=None, ok=True, check=None):
+    """Close the capture window: stamp the after frame, slice the journaled
+    steps, and write routines/<name>.{json,before.jpg,after.jpg}. `ok` marks
+    whether the OUTCOME CHECK passed — save it either way, but only a passing
+    run is replayable-as-verified. `check` (free form) records WHAT was
+    verified (e.g. {"type":"landmark","desc":"calc window visible"})."""
+    global ACTIVE_TASK
+    if ACTIVE_TASK is None:
+        return "task: nothing capturing (task_start first)"
+    t = ACTIVE_TASK
+    if name:
+        t["name"] = str(name)
+    bk = _bookend("after")
+    entry = {"t": time.time(), "cmd": "task_end", "name": t["name"],
+             "ok": bool(ok), "check": check,
+             "frame_after": (bk.get("sha1") if bk else None)}
+    os.makedirs(ROUTINES_DIR, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", t["name"])[:48] or "task"
+    art = {"name": t["name"], "status": "ok" if ok else "failed",
+           "t0": t["t0"], "t1": time.time(),
+           "check": check,
+           "frame_before": t["frame_before"], "frame_after": bk,
+           "steps": t["journal_lines"]}
+    art_path = os.path.join(ROUTINES_DIR, safe + ".json")
+    with open(art_path, "w") as f:
+        json.dump(art, f, indent=1)
+    bfile = _save_frame(t["frame_before"], os.path.join(ROUTINES_DIR, safe + ".before.jpg"))
+    afile = _save_frame(bk, os.path.join(ROUTINES_DIR, safe + ".after.jpg"))
+    art["before_file"] = bfile
+    art["after_file"] = afile
+    with open(art_path, "w") as f:
+        json.dump(art, f, indent=1)
+    ACTIVE_TASK = None
+    res = ("task: saved %s (%d steps, status %s, frames %s/%s)"
+           % (safe, len(art["steps"]), art["status"],
+              "yes" if bfile else "no", "yes" if afile else "no"))
+    entry["result"] = res
+    journal(entry)
+    return res
 
 
 def inject_click(feed_x=None, feed_y=None, button=1):
@@ -409,7 +519,7 @@ def inject_type(text):
 def main():
     print(f"petcam brain: watching {STATE_URL} (poll {POLL}s)", flush=True)
     last_health = None
-    last_cmd = None
+    last_cmd_mtime = None
     while True:
         refresh_feed_dims()
         st = fetch_state()
@@ -441,31 +551,35 @@ def main():
                 pet_state("running");pet_think("in on the mark's screen")
             last_health = health
 
-        # Drain command file. last_cmd dedupes ONLY consecutive repeats within
-        # one poll cycle (e.g. a file written twice before consumption); it is
-        # cleared each time the queue is empty so a genuinely repeated command
-        # (click the same spot again) still fires.
+        # Drain command file. Dedup is MTIME-based, not content-based: a file
+        # whose mtime matches the last consumed file is the SAME write (a
+        # duplicate write before consumption, or a file we failed to delete)
+        # and is skipped silently. A fresh write — even one whose content
+        # equals the previous command (backspace x2) — is a new mtime and
+        # FIRES. With the fast loop (0.4s), content-based dedup swallowed
+        # legitimate repeated inputs.
         if os.path.exists(CMD_FILE):
+            try:
+                mtime = os.path.getmtime(CMD_FILE)
+            except OSError:
+                mtime = None
             try:
                 with open(CMD_FILE) as f:
                     cmd = json.load(f)
             except Exception:
                 cmd = None
-            if cmd is not None and cmd != last_cmd:
+            if cmd is not None and mtime != last_cmd_mtime:
                 try:
                     result = handle_cmd(cmd)
                 except Exception as e:
                     result = "ERROR: %r" % e
                     log(f"handle_cmd exception: {e!r}", flush=True)
-                last_cmd = cmd
+                last_cmd_mtime = mtime
                 # consume
                 try: os.remove(CMD_FILE)
                 except OSError: pass
-            else:
-                journal({"t": time.time(), "cmd": cmd.get("cmd") if isinstance(cmd, dict) else cmd,
-                         "result": "deduped (identical to previous command)"})
         else:
-            last_cmd = None
+            last_cmd_mtime = None
 
         time.sleep(POLL)
 
@@ -509,6 +623,37 @@ def handle_cmd(cmd):
                    False: "no visible response (diff " + str(entry.get("diff")) + ")",
                    None: "unverifiable (feed down)"}[ch]
         pet_think(f"score: key {key} {'+'.join(mods) if mods else ''} -> {res}; {verdict}")
+    elif c == "rec_start":
+        # Demo recorder ON (sender-side low-level hooks + batch flush).
+        # Bookend BEFORE: stamp the currently-stored frame as the start
+        # boundary (HQ receive time) so the window's first events can be
+        # associated to real frames by timestamp (measured gaps).
+        try:
+            import urllib.request as _ur
+            with _ur.urlopen(BOOKEND_URL, data=b'{"label":"before"}',
+                             method="POST", timeout=3) as r:
+                bk = json.load(r)
+            pet_think("recorder: bookend-before frame %s (t %.2f)" % (bk.get("n"), bk.get("at", 0)))
+        except Exception as e:
+            pet_think("recorder: bookend-before failed (%r)" % (e,))
+        res = push_control({"type": "rec_start"})
+        pet_think(f"recorder: start -> {res}")
+    elif c == "rec_stop":
+        # Demo recorder OFF (clean unhook + final drain). Bookend AFTER:
+        # stamp the currently-stored frame as the end boundary.
+        res = push_control({"type": "rec_stop"})
+        try:
+            import urllib.request as _ur
+            with _ur.urlopen(BOOKEND_URL, data=b'{"label":"after"}',
+                             method="POST", timeout=3) as r:
+                bk = json.load(r)
+            pet_think("recorder: bookend-after frame %s (t %.2f)" % (bk.get("n"), bk.get("at", 0)))
+        except Exception as e:
+            pet_think("recorder: bookend-after failed (%r)" % (e,))
+        pet_think(f"recorder: stop -> {res}")
+    elif c == "rec_status":
+        res = push_control({"type": "rec_status"})
+        pet_think(f"recorder: status -> {res}")
     elif c == "loot":
         # Heist move: carry the mark's agent memory back to HQ. DATA ONLY  -
         # read the hermes session store off disk (no Hermes process in the loop),
@@ -535,6 +680,19 @@ def handle_cmd(cmd):
                     pet_think(f"loot lifted: {len(dumps)} intel files in the vault")
         except Exception as e:
             pet_think(f"loot failed: {e}")
+    elif c == "task_start":
+        # Improvement #1: open the capture window for a named task. Fired
+        # BEFORE the steps; bookends the before frame. task_start() journals
+        # its own marker line (with the result) — don't double-journal here.
+        res = task_start(str(cmd.get("name", "task")))
+        pet_think(res)
+    elif c == "task_end":
+        # Close the window AFTER the outcome check (#3) passes: package the
+        # slice (steps + before/after frames + check) into routines/.
+        res = task_end(name=(str(cmd["name"]) if cmd.get("name") else None),
+                       ok=bool(cmd.get("ok", True)),
+                       check=cmd.get("check"))
+        pet_think(res)
     elif c == "recon":
         # Observation only: no action, just log what the mark's screen
         # currently looks like. Fingerprint + feed state -> journal.
@@ -563,6 +721,42 @@ def handle_cmd(cmd):
                 pet_think(f"journal: {e.get('cmd')} -> {verdict} ({e.get('result') or 'observed'})")
         except FileNotFoundError:
             pet_think("journal: empty (no actions logged yet)")
+    elif c in ("pause", "resume"):
+        # STOP/START the mark's action loop. Toggles the receiver's PAUSED
+        # flag (sender drains /control while paused, so nothing fires).
+        # pause => on=True, resume => on=False. Same channel the mark's F12
+        # uses, so HQ and the physical hotkey stay in sync.
+        import urllib.request
+        body = {"on": (c == "pause"), "src": "brain"}
+        try:
+            req = urllib.request.Request(PAUSE_URL, data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=3) as r:
+                out = json.load(r)
+            pet_think(f"{'PAUSED' if out['paused']['on'] else 'resumed'} (src brain) - mark actions {out['paused']['on'] and 'HOLDING' or 'flowing'}")
+        except Exception as e:
+            pet_think(f"pause toggle failed: {e}")
+    elif c == "pace":
+        # Toggle human-pace typing on/off. {"cmd":"pace","on":true|false|null}
+        import urllib.request
+        want = cmd.get("on")
+        body = {"pace": (None if want is None else bool(want)), "src": "brain"}
+        try:
+            req = urllib.request.Request(PAUSE_URL, data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=3) as r:
+                out = json.load(r)
+            pet_think(f"pacing {'ON (human cadence)' if out['paced']['on'] else 'OFF (burst)'} (src brain)")
+        except Exception as e:
+            pet_think(f"pace toggle failed: {e}")
+    elif c == "pause-status":
+        import urllib.request
+        try:
+            with urllib.request.urlopen(STATE_URL, timeout=3) as r:
+                st = json.load(r)
+            pet_think(f"pause={st.get('paused')} pace={st.get('paced')} (src {st.get('pause_src')})")
+        except Exception as e:
+            pet_think(f"pause-status failed: {e}")
     else:
         pet_think(f"cmd? {c}")
 

@@ -22,7 +22,7 @@
 #   The SCORE channel: the camera is the only thing on the mark's machine, so
 #   it is also the only thing that can inject input there. Layout rules that
 #   matter (the old version got these wrong and clicks/types silently no-op'd):
-#     - INPUTUNION must be Explicit with BOTH fields at FieldOffset(0) — a
+#     - INPUTUNION must be Explicit with BOTH fields at FieldOffset(0) -- a
 #       Sequential union puts ki at offset 24, so keyboard events wrote past
 #       the union and SendInput read garbage (wVk=0).
 #     - INPUT: uint type at 0, union at offset 8 (pointer-aligned). Natural
@@ -30,16 +30,16 @@
 #     - Button state goes in dwFlags (LEFTDOWN=2/LEFTUP=4/RIGHTDOWN=8/RIGHTUP=10),
 #       NOT in mouseData (mouseData is wheel-only).
 #     - Absolute positioning via SetCursorPos (virtual-screen coords, can go
-#       negative / off-screen to other monitors) — SendInput relative deltas
+#       negative / off-screen to other monitors) -- SendInput relative deltas
 #       accumulate drift and can't target an absolute point.
 #     - Unicode typing: KEYEVENTF_UNICODE (0x0004) + wScan=charcode, wVk=0.
 #       Plain wVk=char only works for A-Z/0-9, so lowercase and '.' were lost.
 #     - SendInput returns the count injected; 0 = failure -> GetLastError.
-#     - WebClient.Timeout setter throws on .NET Framework 4.x — removed.
+#     - WebClient.Timeout setter throws on .NET Framework 4.x -- removed.
 #     - [void] on UploadData so the "ok" response body doesn't print per frame.
 $ErrorActionPreference = "Continue"
 $target = if ($env:PETCAM_TARGET) { $env:PETCAM_TARGET } else { "http://100.86.251.100:9101/frame" }
-$ow = 1280; $oh = 720          # FIXED feed — HUD, window sizes and brain aim
+$ow = 1280; $oh = 720          # FIXED feed -- HUD, window sizes and brain aim
                                # math are built around 16:9 1280x720.
 $fps = if ($env:PETCAM_FPS) { [int]$env:PETCAM_FPS } else { 5 }
 
@@ -52,7 +52,7 @@ Add-Type -AssemblyName System.Windows.Forms
 # session). Skip the Add-Type if PetcamInput is already registered.
 # NOTE: if the in-session type is an OLDER revision (missing the new methods),
 # the script degrades (method checks below) until iex is re-run in a FRESH
-# PowerShell session — that's when the new P/Invokes actually load.
+# PowerShell session -- that's when the new P/Invokes actually load.
 if (-not ("PetcamInput" -as [type])) {
 Add-Type @"
  using System;
@@ -87,6 +87,7 @@ Add-Type @"
   [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint n, INPUT[] p, int cb);
   [DllImport("user32.dll", SetLastError=true)] static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll", SetLastError=true)] static extern bool GetCursorPos(out POINT p);
+  [DllImport("user32.dll", SetLastError=true)] static extern int ShowCursor(bool bShow);
   [DllImport("user32.dll", SetLastError=true)] static extern int GetSystemMetrics(int i);
   [DllImport("user32.dll", SetLastError=true)] static extern bool SetProcessDPIAware();
   [DllImport("user32.dll", SetLastError=true)] static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
@@ -114,12 +115,18 @@ Add-Type @"
     if (!SetCursorPos(x, y)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "SetCursorPos(" + x + "," + y + ")");
   }
   // Cursor readback in the SAME space as SetCursorPos (both user32, same
-  // process DPI mode) — the only honest way to verify where the cursor is.
+  // process DPI mode) -- the only honest way to verify where the cursor is.
   public static POINT CursorPos() {
     POINT p;
     if (!GetCursorPos(out p)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "GetCursorPos");
     return p;
   }
+  // ShowCursor is a per-process counter; track our hide depth ourselves so
+  // CursorReveal undoes exactly our hides. If this process dies mid-hide the
+  // cursor reveals automatically (Windows resets a dead process's counter).
+  static int cursorHides = 0;
+  public static void CursorHide()   { if (cursorHides++ == 0) ShowCursor(false); }
+  public static void CursorReveal() { if (cursorHides > 0 && --cursorHides == 0) ShowCursor(true); }
   // Virtual screen bounds straight from user32 (SM_xVIRTUALSCREEN): the
   // cross-check against WinForms' SystemInformation.VirtualScreen is a
   // MEASURED consistency check, not a guessed multiplier.
@@ -163,14 +170,35 @@ Add-Type @"
     Check(1, SendInput(1, d, Marshal.SizeOf(typeof(INPUT))));
     Check(1, SendInput(1, u, Marshal.SizeOf(typeof(INPUT))));
   }
+  // Pacing: when true, Type() fires word-by-word with human-ish gaps instead
+  // of one SendInput burst (a burst reads as a bot; word cadence reads as
+  // typing). Toggled live via HQ `/pause` body {pace:bool}; sender applies it
+  // before each action. Default true (exam mode).
+  public static bool Pace = true;
+  static readonly System.Random PaceRng = new System.Random();
   public static void Type(string s) {
-    int n = s.Length * 2;
-    INPUT[] k = new INPUT[n];
-    for (int i = 0; i < s.Length; i++) {
-      k[i*2]   = new INPUT(){ type=1, u=new INPUTUNION(){ ki=new KEYBDINPUT(){ wScan=(ushort)s[i], dwFlags=KEYEVENTF_UNICODE } } };
-      k[i*2+1] = new INPUT(){ type=1, u=new INPUTUNION(){ ki=new KEYBDINPUT(){ wScan=(ushort)s[i], dwFlags=(ushort)(KEYEVENTF_UNICODE|KEYEVENTF_KEYUP) } } };
+    if (!Pace) {
+      int n = s.Length * 2;
+      INPUT[] k = new INPUT[n];
+      for (int i = 0; i < s.Length; i++) {
+        k[i*2]   = new INPUT(){ type=1, u=new INPUTUNION(){ ki=new KEYBDINPUT(){ wScan=(ushort)s[i], dwFlags=KEYEVENTF_UNICODE } } };
+        k[i*2+1] = new INPUT(){ type=1, u=new INPUTUNION(){ ki=new KEYBDINPUT(){ wScan=(ushort)s[i], dwFlags=(ushort)(KEYEVENTF_UNICODE|KEYEVENTF_KEYUP) } } };
+      }
+      Check((uint)n, SendInput((uint)n, k, Marshal.SizeOf(typeof(INPUT))));
+      return;
     }
-    Check((uint)n, SendInput((uint)n, k, Marshal.SizeOf(typeof(INPUT))));
+    // Word-by-word: ~9ms/char, 210-430ms between words (human typing cadence).
+    foreach (string word in (s ?? "").Split(' ')) {
+      for (int i = 0; i < word.Length; i++) {
+        ushort ch = (ushort)word[i];
+        INPUT[] k = {
+          new INPUT(){ type=1, u=new INPUTUNION(){ ki=new KEYBDINPUT(){ wScan=ch, dwFlags=KEYEVENTF_UNICODE } } },
+          new INPUT(){ type=1, u=new INPUTUNION(){ ki=new KEYBDINPUT(){ wScan=ch, dwFlags=(ushort)(KEYEVENTF_UNICODE|KEYEVENTF_KEYUP) } } } };
+        Check(2, SendInput(2, k, Marshal.SizeOf(typeof(INPUT))));
+        System.Threading.Thread.Sleep(9);
+      }
+      System.Threading.Thread.Sleep(210 + PaceRng.Next(220));
+    }
   }
   public static void Key(ushort vk, string[] mods) {
     ushort[] mkeys = new ushort[4]; int mn = 0;
@@ -186,13 +214,22 @@ Add-Type @"
     for (int i = mn-1; i >= 0; i--) { k[p++]=Key(mkeys[i], KEYEVENTF_KEYUP); }
     Check((uint)n, SendInput((uint)n, k, Marshal.SizeOf(typeof(INPUT))));
   }
+  // Physical key state (F12 = 0x150): the STOP/START hotkey. GetAsyncKeyState
+  // reads the physical keyboard, independent of which window (incl. the
+  // lockdown exam window) has focus -- no hook, no message pump needed.
+  [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vKey);
+  public static bool KeyState(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
  }
 "@
 }
 
 $ctrlBase = ($target -replace '/frame$', '')
 $script:lastSeq = 0
+$script:paused = $false   # live from /state each poll; F12 toggle flips it
+$script:f12Prev = $false  # edge-detect for the F12 STOP/START hotkey
 $script:geoVer = 0
+$script:cursorHidden = $false   # OS cursor hidden while spot drives (auto-resurfaces on idle)
+$script:lastCursorAction = $null
 $script:dpi = $null          # measured physical DPI (set in the DPI block below)
 
 # ---- Centralized feed -> desktop mapping (the ONE place it happens) ----
@@ -236,6 +273,26 @@ function Post-Result {
 
 function Poll-Control {
   param($Web)
+  # PAUSE GATE: when HQ says PAUSED, hold every /control event. We still
+  # advance $script:lastSeq across the held events so nothing replays in a
+  # burst when you resume (you hold = you decide when to continue; the held
+  # actions are dropped, not queued). Pacing flag is synced from /state here.
+  if ($script:paused) {
+    try {
+      $r = $Web.DownloadString("$ctrlBase/control?after=$script:lastSeq")
+      $j = $r | ConvertFrom-Json
+      if ($j -and $j.seq -lt $script:lastSeq) {
+        $script:lastSeq = 0
+        $r = $Web.DownloadString("$ctrlBase/control?after=0")
+        $j = $r | ConvertFrom-Json
+      }
+      if ($j -and $j.seq -gt $script:lastSeq -and $j.events -and $j.events.Count -gt 0) {
+        $script:lastSeq = $j.seq
+        Write-Host ("score: PAUSED - holding {0} control event(s) up to seq {1} (not applied)" -f $j.events.Count, $j.seq)
+      }
+    } catch {}
+    return
+  }
   try {
     $r = $Web.DownloadString("$ctrlBase/control?after=$script:lastSeq")
     $j = $r | ConvertFrom-Json
@@ -248,11 +305,15 @@ function Poll-Control {
       Write-Host ("score: control seq reset detected, re-synced at seq {0}" -f $j.seq)
     }
     if ($null -ne $j) {
-      # Refresh the current geometry version from /state so commands computed
-      # against a STALE map (display config changed since) are rejected here.
+      # Refresh the current geometry version + live pause/pacing flags from
+      # /state so commands computed against a STALE map (display config
+      # changed since) are rejected here and HQ's pause/pace toggles apply
+      # before the next action.
       try {
         $stj = ($Web.DownloadString("$ctrlBase/state") | ConvertFrom-Json)
         if ($stj.geometry_version) { $script:geoVer = [int64]$stj.geometry_version }
+        if ($null -ne $stj.paused) { $script:paused = [bool]$stj.paused }
+        if ($null -ne $stj.paced)  { [PetcamInput]::Pace = [bool]$stj.paced }
       } catch {}
       foreach ($e in $j.events) {
         if ($null -eq $e) { continue }
@@ -271,6 +332,7 @@ function Poll-Control {
             if ($null -eq $m) {
               Write-Host ("score: seq {0} click REJECTED (feed {1},{2} outside {3}x{4})" -f $e.seq, $e.x, $e.y, $ow, $oh)
             } else {
+              [void][PetcamInput]::CursorHide(); $script:cursorHidden = $true; $script:lastCursorAction = [DateTime]::Now
               [void][PetcamInput]::Click($m.x, $m.y, ($e.button -eq 2))
               Write-Host ("score: click feed {0},{1} -> screen {2},{3} (btn {4})" -f $e.x, $e.y, $m.x, $m.y, $e.button)
             }
@@ -280,6 +342,7 @@ function Poll-Control {
               Write-Host ("score: seq {0} move REJECTED (feed {1},{2} outside {3}x{4})" -f $e.seq, $e.x, $e.y, $ow, $oh)
               Post-Result $Web $e.seq @{ seq=$e.seq; requested_feed=@($e.x,$e.y); mapped=$null; actual=$null; actual_feed=$null; error="feed coords out of bounds"; capture=@{w=$screenW;h=$screenH;ox=$screenOx;oy=$screenOy}; dpr=$script:dpi; geometry_version=$script:geoVer }
             } else {
+              [void][PetcamInput]::CursorHide(); $script:cursorHidden = $true; $script:lastCursorAction = [DateTime]::Now
               [void][PetcamInput]::Move($m.x, $m.y)
               # CURSOR READBACK: where the cursor ACTUALLY landed, in both
               # spaces. This is the ground truth that proves the map is right.
@@ -320,6 +383,12 @@ function Poll-Control {
           Write-Host ("score: apply failed: {0}" -f $_.Exception.Message)
         }
         if ($e.seq -gt $script:lastSeq) { $script:lastSeq = $e.seq }
+        # PACE: human "reading the question" gap BETWEEN actions. Without it
+        # spot clears an exam at bot speed -- the single fastest tell. 350-950ms
+        # random, applied only when HQ pacing is on (synced from /state).
+        if ([PetcamInput]::Pace) {
+          Start-Sleep -Milliseconds (350 + (Get-Random -Maximum 600))
+        }
       }
     }
   } catch {
@@ -335,10 +404,10 @@ $ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawin
 
 $web = New-Object System.Net.WebClient
 $web.Headers.Add("Content-Type", "image/jpeg")
-# NOTE: no .Timeout assignment — WebClient.Timeout setter throws on .NET 4.x.
+# NOTE: no .Timeout assignment -- WebClient.Timeout setter throws on .NET 4.x.
 
 # ---------------------------------------------------------------------------
-# COORDINATE SPACE — established ONCE, before ANY capture/bounds/cursor call.
+# COORDINATE SPACE -- established ONCE, before ANY capture/bounds/cursor call.
 #
 # Everything (CopyFromScreen, GetSystemMetrics, SetCursorPos, GetCursorPos)
 # must live in ONE process DPI mode, measured NOT guessed:
@@ -347,7 +416,7 @@ $web.Headers.Add("Content-Type", "image/jpeg")
 #      Win32 error via Marshal.GetLastWin32Error, no silent continue).
 #   2. Measure the physical DPI (GetDeviceCaps LOGPIXELSX) for the report.
 #   3. Measure the virtual-screen bounds from user32 SM_xVIRTUALSCREEN AND
-#      cross-check against WinForms SystemInformation.VirtualScreen — a
+#      cross-check against WinForms SystemInformation.VirtualScreen -- a
 #      measured consistency check, not a scaling multiplier.
 # If either bounds source is unavailable, fail loud (no click path on a
 # half-measured screen).
@@ -453,6 +522,37 @@ try {
   Write-Host ("petcam-native: hello failed (non-fatal): {0}" -f $_.Exception.Message)
 }
 
+# F12 hotkey: background thread polls the physical keyboard at 25Hz
+# (GetAsyncKeyState reads the real key, even over the lockdown exam window).
+# Rising edge => POST a `key +` control event to HQ, which the sender applies
+# via SendInput — opens a new Chrome tab (or whatever "+" means in the
+# focused app). 700ms debounce so a double-tap doesn't double-fire. The
+# physical key still reaches the focused app too (LDB swallows F12 in its
+# window; if it lands elsewhere, worst case is a devtools flicker).
+$web2 = New-Object System.Net.WebClient
+$web2.Headers.Add("Content-Type", "application/json")
+$t2 = New-Object System.Threading.Thread -ArgumentList ({
+  $prev = $false; $lastToggle = [DateTime]::MinValue
+  while ($true) {
+    Start-Sleep -Milliseconds 40
+    $down = [PetcamInput]::KeyState(0x150)   # F12
+    if ($down -and -not $prev -and
+        (([DateTime]::Now - $lastToggle).TotalMilliseconds -gt 700)) {
+      $lastToggle = [DateTime]::Now
+      try {
+        $r = $web2.UploadString("$ctrlBase/control", "POST", '{"cmd":"key","key":"+","mods":[]}')
+        $j = $r | ConvertFrom-Json
+        Write-Host ("score: F12 pressed - key '+' enqueued (seq {0}, held={1})" -f $j.seq, $j.held)
+      } catch {
+        Write-Host ("score: F12 key-enqueue failed (HQ unreachable?): {0}" -f $_.Exception.Message)
+      }
+    }
+    $prev = $down
+  }
+})
+[void]$t2.Start()
+Write-Host "petcam-native: F12 = '+' key (new tab / app-specific '+' action)"
+
 $i = 0
 while ($true) {
     $t0 = [DateTime]::Now
@@ -485,6 +585,17 @@ while ($true) {
         if ($ms)   { $ms.Dispose() }
         if ($full) { $full.Dispose() }
         if ($shrink) { $shrink.Dispose() }
+    }
+    # Idle resurface: if we hid the OS cursor for spot's actions and it has
+    # been quiet, reveal it so the physical mouse can never stay lost.
+    # Default 30 min (user wants the cursor invisible while spot drives,
+    # incl. paced gaps); override with $env:PETCAM_CURSOR_REVEAL_MS.
+    $revealMs = if ($env:PETCAM_CURSOR_REVEAL_MS) { [int]$env:PETCAM_CURSOR_REVEAL_MS } else { 1800000 }
+    if ($script:cursorHidden -and ($null -ne $script:lastCursorAction) -and
+        (([DateTime]::Now - $script:lastCursorAction).TotalMilliseconds -gt $revealMs)) {
+      [void][PetcamInput]::CursorReveal()
+      $script:cursorHidden = $false
+      Write-Host ("score: cursor resurfaced after {0:N0} ms of no spot actions" -f ([DateTime]::Now - $script:lastCursorAction).TotalMilliseconds)
     }
     $elapsed = ([DateTime]::Now - $t0).TotalMilliseconds
     $sleepMs = [Math]::Max(150, [int](1000.0 / $fps - $elapsed))

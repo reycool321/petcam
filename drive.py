@@ -27,8 +27,15 @@ Usage (all coords in FEED pixels):
                      #   used for result verification is never modified.
                      # --viewport: trim letterbox bars, keep the image rect.
   drive.py state
+  drive.py pause [on|off] [--pace on|off]   # STOP/START gate + human pacing.
+                            # The mark's F12 key does the same toggle from the
+                            # other side (src=mark). While ON, the sender
+                            # drains /control but applies nothing.
   drive.py geometry       # the full map: feed dims, capture bounds, geo ver,
                            # HQ viewport rect (feed px + window-local px)
+  drive.py task-start NAME      # open the routine capture window (task_start)
+  drive.py task-end [--ok 0|1] [--check JSON]   # close it + save the artifact
+  python3 replay.py NAME [--dry-run] [--check landmark]   # replay a saved routine
 
 Rules baked in:
   - Explicit coords are feed pixels; out-of-bounds (0 <= x < feedW,
@@ -56,6 +63,7 @@ BASE = os.environ.get("PETCAM_BASE", "http://100.86.251.100:9101")
 CMD_FILE = os.path.join(HERE, "cmd.json")
 JOURNAL = os.path.join(HERE, "journal.jsonl")
 SEQ_RE = re.compile(r"seq (\d+)")
+_KEEP = object()   # sentinel: leave the pause flag untouched (pace-only call)
 
 
 def get(path, timeout=5):
@@ -150,10 +158,36 @@ def state():
     age = time.time() - st["last_frame_at"]
     ctl = time.time() - st.get("last_control_poll_at", 0)
     health = "live" if age < 10 else "stale" if age < 120 else "dead"
+    paused = st.get("paused")
+    paced = st.get("paced")
+    extra = ""
+    if paused is not None:
+        extra = " | pause=%s pace=%s (src %s)" % (
+            "ON" if paused else "off",
+            "on" if paced else "off", st.get("pause_src"))
     print(f"{health}: frame age {age:.1f}s, ctrl poll {ctl:.1f}s, "
           f"frames {st['frames']}, client {st['last_client']}, "
-          f"frame {st.get('frame_w')}x{st.get('frame_h')}, geo {st.get('geometry_version')}")
+          f"frame {st.get('frame_w')}x{st.get('frame_h')}, geo {st.get('geometry_version')}{extra}")
     return health
+
+
+def pause(on=None, pace=None, src="hq"):
+    """Toggle / set the receiver's pause flag (and pacing) the sender gates on.
+    on=None => toggle (sends "on":null); on=True/False => set. pace same.
+    on=_KEEP => leave pause untouched (pace-only call). src tags the origin so
+    /state can show who flipped it. Returns the receiver's reply."""
+    import urllib.request
+    body = {"src": src}          # type: dict
+    if on is not _KEEP:
+        body["on"] = on          # None -> JSON null -> receiver toggles
+    if pace is not None:
+        body["pace"] = bool(pace)
+    payload = json.dumps(body).encode()
+    req = urllib.request.Request(BASE + "/pause", data=payload,
+                                 headers={"Content-Type": "application/json"},
+                                 method="POST")
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.load(r)
 
 
 # ------------------------------------------------------------------- journal
@@ -185,15 +219,15 @@ def send(cmd, wait=True, timeout=20):
     with open(CMD_FILE, "w") as f:
         json.dump(cmd, f)
     if not wait:
-        time.sleep(1.0)
+        time.sleep(0.3)
         return None
     deadline = time.time() + timeout
     while time.time() < deadline:
         for e in _journal_since(mark):
             if e.get("cmd") == cmd.get("cmd"):
-                time.sleep(0.4)   # let the brain consume the cmd file
+                time.sleep(0.15)  # let the brain consume the cmd file
                 return e
-        time.sleep(0.8)
+        time.sleep(0.25)
     return None
 
 
@@ -349,6 +383,82 @@ def _trim_viewport(raw, path):
     return path
 
 
+# ------------------------------------------------- chatgpt relay (2026-10-08)
+def _img_sig(raw):
+    from PIL import Image
+    import io
+    return Image.open(io.BytesIO(raw)).convert("L").resize((96, 96)).getdata()
+
+
+def _sig_diff(a, b):
+    return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
+
+
+def wait_stream_done(max_wait=120.0, stable_s=3.0, interval=1.0):
+    """Poll /latest.jpg until the frame stops changing: ChatGPT streams its
+    answer, so a stable frame (mean abs 96x96-gray diff < 1.5 for stable_s
+    straight seconds) means the send button is back to idle = answer done.
+    Returns (settled, elapsed_s, last_diff). HINT ONLY — verify the answer on
+    a fresh shot; a long pause between tokens can read as settled."""
+    prev = _img_sig(get("/latest.jpg"))
+    t0 = time.time()
+    stable_since = None
+    last_diff = 0.0
+    while True:
+        time.sleep(interval)
+        cur = _img_sig(get("/latest.jpg"))
+        last_diff = _sig_diff(prev, cur)
+        prev = cur
+        if last_diff < 1.5:
+            if stable_since is None:
+                stable_since = time.time()
+            if time.time() - stable_since >= stable_s:
+                return True, time.time() - t0, last_diff
+        else:
+            stable_since = None
+        if time.time() - t0 >= max_wait:
+            return False, time.time() - t0, last_diff
+
+
+def cmd_chatgpt_ask(questions, focus=None, max_wait=120.0, stable_s=3.0):
+    """Relay questions to the ChatGPT WINDOW on the mark (same thread, back
+    and forth). Per question: fresh pre-shot -> click the safe point inside
+    the white input box (focus-first rule) -> type -> enter -> wait for the
+    stream to settle (wait_stream_done) -> fresh answer shot. The default
+    focus point is 0.75*W, 0.854*H in feed pixels (the (960,615)@1280x720
+    safe spot, scaled to the LIVE feed dims — never the literal 1280x720).
+    Verify each answer with vision on the answer shot before acting on it."""
+    fw, fh = frame_dims()
+    if focus is None:
+        fx, fy = check_feed(0.75 * fw, 0.854 * fh)
+    else:
+        fx, fy = check_feed(focus[0], focus[1])
+    print("chatgpt-ask: %d question(s), focus %d,%d, stream-wait max %.0fs stable %.1fs"
+          % (len(questions), fx, fy, max_wait, stable_s))
+    for i, q in enumerate(questions):
+        label = "Q%d" % (i + 1)
+        s0 = shot()
+        print("%s pre-shot: %s" % (label, s0))
+        e = send({"cmd": "click", "x": fx, "y": fy, "button": 1})
+        print("%s focus %d,%d: %s; %s" % (label, fx, fy,
+              e.get("result") if e else "?", _verdict(e)))
+        time.sleep(0.6)
+        e = send({"cmd": "type", "text": q}, timeout=120)  # paced typing is slow
+        print("%s type %d chars: %s; %s" % (label, len(q),
+              e.get("result") if e else "?", _verdict(e)))
+        time.sleep(0.6)
+        e = send({"cmd": "key", "key": "enter"})
+        print("%s enter: %s; %s" % (label, e.get("result") if e else "?", _verdict(e)))
+        print("%s waiting for stream to settle..." % label)
+        done, elapsed, diff = wait_stream_done(max_wait=max_wait, stable_s=stable_s)
+        print("%s stream %s after %.1fs (final diff %.2f)"
+              % (label, "SETTLED" if done else "TIMED OUT", elapsed, diff))
+        s1 = shot()
+        print("%s answer: %s  (VISION-VERIFY before acting)" % (label, s1))
+        if i < len(questions) - 1:
+            time.sleep(0.8)
+
+
 # --------------------------------------------------------------------- main
 def main():
     a = sys.argv[1:]
@@ -369,6 +479,28 @@ def main():
         print(shot(path, marker, viewport))
     elif c == "state":
         state()
+    elif c == "pause":
+        # pause [on|off] [--pace on|off]  -- toggle/set the STOP flag + pacing.
+        # Bare `pause` toggles; `pause off` resumes; `pause --pace on` sets
+        # pacing only (pause flag untouched). src=hq (mark's F12 uses src=mark).
+        on = None          # None = toggle; _KEEP = leave pause alone
+        pace = None
+        i = 1
+        saw_onoff = False
+        while i < len(a):
+            if a[i] == "--pace":
+                pace = (a[i + 1] == "on"); i += 2
+            elif a[i] in ("on", "off"):
+                on = (a[i] == "on"); saw_onoff = True; i += 1
+            else:
+                i += 1
+        if not saw_onoff and pace is not None:
+            on = _KEEP     # pace-only: don't touch the pause flag
+        out = pause(on=on, pace=pace, src="hq")
+        p = out.get("paused", {}); q = out.get("paced", {})
+        print("pause: %s (src %s) | pace: %s (src %s)" % (
+            "ON" if p.get("on") else "off", p.get("src"),
+            "on" if q.get("on") else "off", q.get("src")))
     elif c == "geometry":
         print(json.dumps(geometry(), indent=2))
     elif c == "move":
@@ -405,6 +537,49 @@ def main():
         print("enter: %s; %s" % (e.get("result") if e else "?", _verdict(e)))
         time.sleep(3)
         print(shot())
+    elif c == "task-start":
+        name = a[1] if len(a) > 1 else "task"
+        e = send({"cmd": "task_start", "name": name})
+        print("task-start %s: %s" % (name, e.get("result") if e else "? (brain down?)"))
+    elif c == "task-end":
+        ok = "1"
+        check = None
+        i = 1
+        while i < len(a):
+            if a[i] == "--ok":
+                ok = a[i + 1]; i += 2
+            elif a[i] == "--check":
+                check = json.loads(a[i + 1]); i += 2
+            else:
+                i += 1
+        cmd = {"cmd": "task_end", "ok": ok == "1"}
+        if check is not None:
+            cmd["check"] = check
+        e = send(cmd)
+        print("task-end: %s" % (e.get("result") if e else "? (brain down?)"))
+    elif c == "chatgpt-ask":
+        # chatgpt-ask "question" [--follow "next"] [--focus X Y] [--wait SECS]
+        # Relay one or more questions to the ChatGPT window, same thread.
+        i = 1
+        questions = []
+        focus = None
+        max_wait = 120.0
+        stable_s = 3.0
+        while i < len(a):
+            if a[i] == "--follow":
+                questions.append(a[i + 1]); i += 2
+            elif a[i] == "--focus":
+                focus = (float(a[i + 1]), float(a[i + 2])); i += 3
+            elif a[i] == "--wait":
+                max_wait = float(a[i + 1]); i += 2
+            elif a[i] == "--stable":
+                stable_s = float(a[i + 1]); i += 2
+            else:
+                questions.append(a[i]); i += 1
+        if not questions:
+            print("usage: drive.py chatgpt-ask \"question\" [--follow \"q2\"] [--focus X Y] [--wait SECS]")
+            return 1
+        cmd_chatgpt_ask(questions, focus=focus, max_wait=max_wait, stable_s=stable_s)
     else:
         print(__doc__)
         return 1

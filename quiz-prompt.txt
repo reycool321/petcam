@@ -1,0 +1,17 @@
+You are driving a LIVE QUIZ on a remote Windows PC through the petcam MJPEG feed (1280x720). Use ONLY the tools listed. Keep it to the MINIMUM tool calls. Do NOT do pixel/blob analysis in code — trust the vision model's coordinates.
+
+1) SHOT: run the terminal command:
+   python3 /home/fabri/apps/petcam/drive.py shot /tmp/qd1.jpg
+
+2) SEE: call vision_analyze on /tmp/qd1.jpg with EXACTLY this question:
+   "In the RIGHT window (x from 640 to 1280) of this 1280x720 screenshot there is a quiz. Read the CURRENT question and its answer options (top to bottom). Pick the single CORRECT answer. Report the feed-pixel (x,y) of the radio button (the small circle) immediately to the LEFT of the correct option, measured in the full 1280x720 image. Also: if instead of an open question the window shows a 'Next' / 'Continue' / 'Quiz Me More' button (the quiz was already answered), report that button's (x,y) and mark it ADVANCE. If no quiz is visible, mark it WAIT. Reply with ONE line only: 'CLICK <x> <y> ANSWER <the chosen option text>' OR 'CLICK <x> <y> ADVANCE' OR 'WAIT <reason>'."
+
+3) ACT:
+   - If the SEE line began 'CLICK <x> <y> ANSWER ...': run terminal: python3 /home/fabri/apps/petcam/drive.py click <x> <y> . Then sleep 2s. Then run terminal: python3 /home/fabri/apps/petcam/drive.py shot /tmp/qd2.jpg . Then vision_analyze /tmp/qd2.jpg with: "Did the quiz register an answer / advance? Is a 'Next'/'Continue'/'Quiz Me More' button now visible? If so give its (x,y) in the 1280x720 image. One line only: 'ADVANCE <x> <y>' OR 'DONE' OR 'NOCHANGE <what you see>'." If it said 'ADVANCE <x> <y>', run terminal: python3 /home/fabri/apps/petcam/drive.py click <x> <y> .
+   - If the SEE line began 'CLICK <x> <y> ADVANCE': run terminal: python3 /home/fabri/apps/petcam/drive.py click <x> <y> .
+   - If the SEE line was WAIT: do nothing.
+
+4) FINAL LINE (the last line of your reply, exactly one line):
+   FIRED <short description of what you clicked>   OR   WAIT <reason>
+
+Keep total tool calls under ~8.
