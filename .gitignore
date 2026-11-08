@@ -11,3 +11,6 @@ latest.jpg
 # runtime/watcher artifacts
 pause-watch.log
 inbox/pause-watch.log
+
+# routine artifacts + run evidence (runtime output; see brain.py task_end, replay.py)
+routines/
