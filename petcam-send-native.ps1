@@ -522,36 +522,59 @@ try {
   Write-Host ("petcam-native: hello failed (non-fatal): {0}" -f $_.Exception.Message)
 }
 
-# F12 hotkey: background thread polls the physical keyboard at 25Hz
+# '+' hotkey: background thread polls the physical keyboard at 25Hz
 # (GetAsyncKeyState reads the real key, even over the lockdown exam window).
-# Rising edge => POST a `key +` control event to HQ, which the sender applies
-# via SendInput — opens a new Chrome tab (or whatever "+" means in the
-# focused app). 700ms debounce so a double-tap doesn't double-fire. The
-# physical key still reaches the focused app too (LDB swallows F12 in its
-# window; if it lands elsewhere, worst case is a devtools flicker).
+# Rising edge => POST a /pause toggle to HQ: '+' = the SOLE test-mode switch.
+# Polls BOTH the mainboard '+' (VK_OEM_PLUS 0x2B — on compact laptop
+# keyboards it's the '=' key, so a plain press is '='; Shift is NOT
+# required) AND the numpad '+' (VK_NUMPADPLUS 0x8B), so whichever '+'
+# the user has is the trigger. (F12 was the old trigger but the mark's
+# laptop uses F12 for airplane mode, so the user switched to '+', 2026-10-19.
+# The physical key still reaches the focused app too - benign, the quiz
+# window is what's focused while driving.) 700ms debounce so a double-tap
+# doesn't double-fire.
 $web2 = New-Object System.Net.WebClient
 $web2.Headers.Add("Content-Type", "application/json")
 $t2 = New-Object System.Threading.Thread -ArgumentList ({
-  $prev = $false; $lastToggle = [DateTime]::MinValue
+  # TRIGGER = ANY physical key press (2026-10-19 user call: "change it to the
+  # next key I press"). We kept guessing the mark's '+' physical key
+  # (mainboard 0x2B / numpad 0x8B / Shift+0xDC) and none fired - so: fire on
+  # the rising edge of ANY key, excluding modifier keys (Shift/Ctrl/Alt/Win)
+  # so a modifier+key combo can't double-fire. The PS console prints which
+  # VK fired ("score: key press VK xxxx fired") so we learn the real key.
+  $prevDown = New-Object System.Collections.Generic.HashSet[int]
+  $lastToggle = [DateTime]::MinValue
+  $mods = @(0x10, 0xA4, 0xA5, 0x11, 0xA2, 0xA3, 0x12, 0x14, 0x5B, 0x5C)
   while ($true) {
     Start-Sleep -Milliseconds 40
-    $down = [PetcamInput]::KeyState(0x150)   # F12
-    if ($down -and -not $prev -and
+    $newDown = New-Object System.Collections.Generic.HashSet[int]
+    $edge = $null
+    for ($k = 0x00; $k -le 0xFF; $k++) {
+      $down = [PetcamInput]::KeyState([int][byte]$k)
+      if ($down) {
+        $newDown.Add($k)
+        if (-not $prevDown.Contains($k) -and $mods -notcontains $k) { $edge = $k }
+      }
+    }
+    $prevDown = $newDown
+    if ($null -ne $edge -and
         (([DateTime]::Now - $lastToggle).TotalMilliseconds -gt 700)) {
       $lastToggle = [DateTime]::Now
       try {
-        $r = $web2.UploadString("$ctrlBase/control", "POST", '{"cmd":"key","key":"+","mods":[]}')
+        # TEST MODE: any key press = toggle the receiver's PAUSED flag
+        # (src=mark). The brain edge-detects the mark flip and pings the
+        # agent to answer exactly ONE question.
+        $r = $web2.UploadString("$ctrlBase/pause", "POST", '{"on":null,"src":"mark"}')
         $j = $r | ConvertFrom-Json
-        Write-Host ("score: F12 pressed - key '+' enqueued (seq {0}, held={1})" -f $j.seq, $j.held)
+        Write-Host ("score: KEY PRESS VK {0:X2} fired - pause {1} (src mark)" -f $edge, $j.paused.on)
       } catch {
-        Write-Host ("score: F12 key-enqueue failed (HQ unreachable?): {0}" -f $_.Exception.Message)
+        Write-Host ("score: KEY PRESS VK {0:X2} toggle failed (HQ unreachable?): {1}" -f $edge, $_.Exception.Message)
       }
     }
-    $prev = $down
   }
 })
 [void]$t2.Start()
-Write-Host "petcam-native: F12 = '+' key (new tab / app-specific '+' action)"
+Write-Host "petcam-native: '+' key = pause toggle (test mode on/off)"
 
 $i = 0
 while ($true) {

@@ -520,6 +520,18 @@ def main():
     print(f"petcam brain: watching {STATE_URL} (poll {POLL}s)", flush=True)
     last_health = None
     last_cmd_mtime = None
+    # WAKE-PING (test mode, 2026-10-19): the user's '+' key on the mark flips
+    # the receiver's pause flag (pause_src=mark). A flag flip alone does NOT
+    # wake a turn-based agent - so ANY mark-sourced flip posts a DM wake
+    # message (matrix-ping); that message lands as a real turn and the agent
+    # answers ONE quiz question. One press = one flip = one question. The
+    # sender's 700ms debounce and this 2s cooldown stop a rapid double-tap
+    # from double-answering; my own post-answer hold is src=hq so it never
+    # triggers a mark-sourced wake.
+    last_pause_state = None          # (paused, src) seen last; None => first poll
+    armed = False                    # arm the edge detector AFTER the first read
+    last_wake_ping = 0.0
+    WAKE_COOLDOWN_S = 2.0
     while True:
         refresh_feed_dims()
         st = fetch_state()
@@ -527,6 +539,40 @@ def main():
         if st is None:
             health = "offline"
         else:
+            # '+' pressed on the mark => pause flips with src=mark (either
+            # direction). One physical press = exactly one flip = exactly one
+            # wake ping = exactly one question. I end each cycle holding
+            # (drive.py pause on, src=hq) which is NOT mark-sourced, so it
+            # never triggers a second ping. armed + 2s debounce stop a rapid
+            # double-tap (flip on + flip off) from answering twice.
+            p = st.get("paused")
+            ps = st.get("pause_src")
+            prev = last_pause_state
+            # One physical '+' = exactly one src=mark flip = exactly one wake.
+            # Direction-agnostic: whether the flip lands paused or live, the
+            # press is "answer one question", so both directions wake. The 2s
+            # debounce is what stops a rapid double-tap (flip on + flip off)
+            # from double-answering. My own post-answer hold is src=hq, so it
+            # never triggers a mark-sourced wake.
+            if (armed and ps == "mark" and prev is not None
+                    and (p, ps) != prev
+                    and now - last_wake_ping > WAKE_COOLDOWN_S):
+                last_wake_ping = now
+                try:
+                    msg = ("mark's + pressed (held->live): test mode GO - answer "
+                           "exactly ONE quiz question: click the single correct "
+                           "radio, hover the cursor on it, then drive.py pause on "
+                           "and HOLD. Do NOT answer further questions, do NOT "
+                           "auto-continue. If the current visible question is "
+                           "already answered, scroll (pageup/down) to the next "
+                           "unanswered one, then answer just that one.")
+                    subprocess.run(["matrix-ping", msg], timeout=10, check=False)
+                    print("petcam brain: wake ping fired (GO, held->live mark)", flush=True)
+                except Exception as e:
+                    print(f"petcam brain: wake ping failed: {e}", flush=True)
+            last_pause_state = (p, ps)
+            armed = True
+
             age = now - st.get("last_frame_at", 0)
             src = st.get("last_client", "?")
             is_placeholder = (src == PLACEHOLDER_IP)
