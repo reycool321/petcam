@@ -7,3 +7,7 @@ backups/
 __pycache__/
 *.pyc
 latest.jpg
+
+# runtime/watcher artifacts
+pause-watch.log
+inbox/pause-watch.log
